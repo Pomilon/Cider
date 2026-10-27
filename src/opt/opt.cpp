@@ -1,5 +1,6 @@
 // opt.cpp — inline, mem2reg, fold, simplify control flow, value-number, hoist
-// loop invariants, forward slots, then dead-code elimination.
+// loop invariants, forward slots, dead-code elimination, then deduplicate
+// read-only bytes.
 //
 // Inlining first clones small direct callees and gives their parameter words
 // fresh slots, so mem2reg can promote the cloned traffic. Mem2reg then turns
@@ -545,6 +546,12 @@ OptResult run(ir::Module& module) {
     result.forwarded = memory.forwarded;
     result.storesRemoved = memory.storesRemoved;
     result.removed = deadCode(module);
+    // DCE first: a DataAddr it deletes is a reference deduplication no longer
+    // needs to rewrite. Pruning later still sees every surviving reference on
+    // its canonical label, so the two passes compose in either order.
+    RodataDedupResult dedup = deduplicateRodata(module);
+    result.rodataMerged = dedup.blobsMerged;
+    result.rodataBytesMerged = dedup.bytesRemoved;
     return result;
 }
 

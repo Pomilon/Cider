@@ -171,7 +171,7 @@ add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/inline.cpp src/opt/gvn.cpp
                                src/opt/licm.cpp src/opt/simplify.cpp
                                src/opt/philower.cpp src/opt/dce.cpp
-                               src/opt/opt.cpp)
+                               src/opt/dedup.cpp src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 
@@ -398,6 +398,17 @@ add_test(NAME v4_global_pruning
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_SOURCE_DIR}/tests/v4/global_pruning_test.py)
 set_tests_properties(v4_global_pruning PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Exact-byte rodata deduplication: repeated string literals emit one blob,
+# every global/DataAddr reference is rewritten to the canonical label, the
+# surviving labels assemble and link, native and both VM legs agree, and
+# --no-opt keeps the per-occurrence blobs. The UEFI assembly path is assembled
+# through clang's COFF target when the toolchain is available.
+add_test(NAME v4_rodata_dedup
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/rodata_dedup_test.py)
+set_tests_properties(v4_rodata_dedup PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
 # Constant control-flow simplification: source-level constant if/else branches

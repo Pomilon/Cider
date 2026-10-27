@@ -73,6 +73,10 @@ struct OptResult {
     uint64_t blocksRemoved = 0;
     uint64_t phisSimplified = 0;
     uint64_t phiIncomingRemoved = 0;
+    // Exact-byte rodata deduplication. `rodataMerged` counts duplicate blobs
+    // removed; `rodataBytesMerged` counts their bytes, including terminators.
+    uint64_t rodataMerged = 0;
+    uint64_t rodataBytesMerged = 0;
 };
 
 // What one inlining run did. Kept separate from OptResult so the pass is
@@ -123,6 +127,31 @@ struct SimplifyResult {
     uint64_t phisSimplified = 0;
     uint64_t phiIncomingRemoved = 0;
 };
+
+// What one exact-byte rodata deduplication run did. `asmPinned` counts blobs
+// kept because assembly names them; `identityPinned` counts blobs whose
+// literal address is observable (a byte-pointer conversion) and therefore
+// cannot be pooled. `referencesRewritten` counts every instruction/global
+// field moved to the canonical label.
+struct RodataDedupResult {
+    uint64_t blobsMerged = 0;
+    uint64_t bytesRemoved = 0;
+    uint64_t referencesRewritten = 0;
+    uint64_t asmPinned = 0;
+    uint64_t identityPinned = 0;
+};
+
+// Merge rodata blobs with identical bytes. The first blob in module order is
+// canonical and keeps its label; every later duplicate is removed and all
+// `DataAddr`, global `initLabel`/`initLabels`/`relocWords` references are
+// rewritten to the canonical label. A label named by module-level or inline
+// assembly is pinned and never removed, so assembly references stay
+// resolvable. A blob carrying `addressIdentity` (a literal converted to a
+// byte pointer, whose address the language treats as distinct) is pinned
+// too. Runs on the phi IR and is independent of whole-program pruning: it is
+// safe for split objects too, because rodata labels are object-local.
+// Idiomatic callers use it through `run`.
+RodataDedupResult deduplicateRodata(ir::Module& module);
 
 // Whole-program function pruning. This is deliberately separate from the
 // instruction-level `deadCode` pass: it removes unreachable definitions, not

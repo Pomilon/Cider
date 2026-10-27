@@ -240,6 +240,15 @@ public:
         int64_t len = 0;
     };
     LoweredString lowerString(const StringLit& lit);
+    // A string literal that converts to a byte pointer keeps its own address:
+    // the language promises two such literals are distinct objects even when
+    // their bytes match. Marking the blob `addressIdentity` keeps rodata
+    // deduplication from merging it. One funnel for every implicit
+    // conversion site, so the rule cannot drift between declarations, calls,
+    // assignments and returns.
+    std::vector<ir::Value> adjustStringLitArg(const Expr* expr,
+                                             std::vector<ir::Value> words,
+                                             const TypeRef& targetType);
     // The rodata address of a wide literal's units: appended zero unit
     // included, little-endian pairs. One blob per occurrence, like narrow
     // strings; array positions read words instead (see wideWords).
@@ -754,6 +763,10 @@ private:
     // visible because frames pop only at block exits.
     void runDefers(uint64_t from);
     uint32_t rodataSeq_ = 0;
+    // DataAddr result id -> rodata label for a narrow string literal. A
+    // conversion to a byte pointer marks that blob address-identity through
+    // this map; the label survives every later IR rewrite.
+    std::unordered_map<uint32_t, std::string> rodataLabelByAddress_;
     uint32_t current_ = 0;
     bool terminated_ = false;
     std::vector<uint32_t> blockOrder_;

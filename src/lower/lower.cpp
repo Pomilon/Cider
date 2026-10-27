@@ -57,15 +57,6 @@ bool isBytePointerTarget(const TypeRef& type) {
            basic == BasicKind::Char;
 }
 
-std::vector<ir::Value> adjustStringLitArg(const Expr* expr,
-                                         std::vector<ir::Value> words,
-                                         const TypeRef& targetType) {
-    if (expr != nullptr && dynamic_cast<const StringLit*>(expr) != nullptr &&
-        isBytePointerTarget(targetType) && words.size() == kSliceWords) {
-        return {words[kFirstWord]};
-    }
-    return words;
-}
 // A closure answers two words, code then captures, in the same positions
 // a slice keeps base and length: the hidden function loads word zero, the
 // allocation behind word one.
@@ -6068,6 +6059,28 @@ std::vector<ir::Value> Lowerer::loadLocal(Position pos, const LocalBinding& bind
     return words;
 }
 
+std::vector<ir::Value> Lowerer::adjustStringLitArg(
+    const Expr* expr, std::vector<ir::Value> words,
+    const TypeRef& targetType) {
+    if (expr == nullptr || dynamic_cast<const StringLit*>(expr) == nullptr ||
+        !isBytePointerTarget(targetType) || words.size() != kSliceWords) {
+        return words;
+    }
+    // The length word is dropped: this occurrence is addressed as a raw byte
+    // pointer, so its identity is observable and dedup must not merge it with
+    // another literal that happens to carry the same bytes.
+    auto found = rodataLabelByAddress_.find(words[kFirstWord].id);
+    if (found != rodataLabelByAddress_.end()) {
+        for (ir::Rodata& blob : module_->rodata) {
+            if (blob.label == found->second) {
+                blob.addressIdentity = true;
+                break;
+            }
+        }
+    }
+    return {words[kFirstWord]};
+}
+
 Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
     LoweredString out;
     std::string bytes;
@@ -6098,6 +6111,7 @@ Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
     data.isPure = true;
     ir::Value at = newValue(data.width, addr, lit.pos);
     data.results.push_back(at);
+    rodataLabelByAddress_[at.id] = out.label;
     emit(std::move(data));
     out.words.push_back(at);
     TypeRef len{ctx_.basic(BasicKind::I64)};
@@ -6139,6 +6153,9 @@ std::string Lowerer::wideBlob(const WideLit& lit) {
     ir::Rodata blob;
     blob.label = label;
     blob.bytes = std::move(bytes);
+    // A wide blob in rodata is always addressed as a pointer (`wideWords`
+    // handles the array spelling), so its address is an identity too.
+    blob.addressIdentity = true;
     module_->rodata.push_back(std::move(blob));
     return label;
 }

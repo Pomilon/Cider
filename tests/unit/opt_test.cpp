@@ -1426,6 +1426,190 @@ void testPhiLowering() {
     }
 }
 
+cider::ir::Rodata dedupBlob(const std::string& label,
+                            const std::string& bytes) {
+    cider::ir::Rodata blob;
+    blob.label = label;
+    blob.bytes = bytes;
+    return blob;
+}
+
+cider::ir::Instr dedupDataAddr(const std::string& label, uint32_t id) {
+    cider::ir::Instr instr;
+    instr.op = cider::ir::Op::DataAddr;
+    instr.globalLabel = label;
+    instr.width = cider::ir::IRType::Ptr;
+    instr.isPure = true;
+    instr.results.push_back(
+        cider::ir::Value{id, cider::ir::IRType::Ptr, {}});
+    return instr;
+}
+
+// Two literals share bytes, one is distinct, and references arrive through a
+// DataAddr, a global's initLabel, a vtable-style initLabels list, and a
+// relocated image word.
+cider::ir::Module dedupFixture() {
+    cider::ir::Module module;
+    module.name = "main";
+
+    cider::ir::Function entry;
+    entry.name = "_start";
+    cider::ir::Block block;
+    block.label = 0;
+    block.body.push_back(dedupDataAddr("s_1", 0));
+    block.body.push_back(dedupDataAddr("s_3", 1));
+    block.term.term = cider::ir::Term::Ret;
+    entry.blocks.push_back(std::move(block));
+    module.functions.push_back(std::move(entry));
+
+    cider::ir::Global first;
+    first.label = "g_first";
+    first.initLabel = "s_1";
+    module.globals.push_back(std::move(first));
+
+    cider::ir::Global second;
+    second.label = "g_second";
+    second.initLabels.push_back("s_3");
+    second.relocWords.push_back({0, "s_3"});
+    module.globals.push_back(std::move(second));
+
+    module.rodata.push_back(dedupBlob("s_0", std::string("same\0", 5)));
+    module.rodata.push_back(dedupBlob("s_1", std::string("same\0", 5)));
+    module.rodata.push_back(dedupBlob("s_2", std::string("other\0", 6)));
+    module.rodata.push_back(dedupBlob("s_3", std::string("same\0", 5)));
+    return module;
+}
+
+void testRodataDedup() {
+    std::printf("identical rodata bytes share the first label\n");
+    cider::ir::Module module = dedupFixture();
+    cider::opt::RodataDedupResult result =
+        cider::opt::deduplicateRodata(module);
+
+    std::string labels;
+    for (const cider::ir::Rodata& blob : module.rodata) {
+        labels += blob.label + ",";
+    }
+    check(labels == "s_0,s_2,", "the first label survives in module order");
+    check(module.rodata[0].bytes == std::string("same\0", 5),
+          "the canonical blob keeps its exact bytes");
+    check(module.rodata[1].bytes == std::string("other\0", 6),
+          "a distinct byte string is not merged");
+    check(result.blobsMerged == 2 && result.bytesRemoved == 10,
+          "both duplicate blobs and their bytes are counted");
+    check(result.referencesRewritten == 5,
+          "every instruction and global reference is rewritten");
+
+    const cider::ir::Block& block = module.functions[0].blocks[0];
+    check(block.body[0].globalLabel == "s_0" &&
+              block.body[1].globalLabel == "s_0",
+          "DataAddr references name the canonical label");
+    check(module.globals[0].initLabel == "s_0",
+          "a global initLabel is rewritten");
+    check(module.globals[1].initLabels.size() == 1 &&
+              module.globals[1].initLabels[0] == "s_0",
+          "a vtable/initializer label list is rewritten");
+    check(module.globals[1].relocWords.size() == 1 &&
+              module.globals[1].relocWords[0].second == "s_0",
+          "a relocated image word is rewritten");
+}
+
+void testRodataDedupPinsAssembly() {
+    std::printf("assembly-mentioned labels stay defined\n");
+    {
+        cider::ir::Module module;
+        module.name = "main";
+        module.moduleAsm = "  .quad s_1\n";
+        module.rodata.push_back(dedupBlob("s_0", std::string("same\0", 5)));
+        module.rodata.push_back(dedupBlob("s_1", std::string("same\0", 5)));
+
+        cider::opt::RodataDedupResult result =
+            cider::opt::deduplicateRodata(module);
+        check(module.rodata.size() == 2,
+              "module asm pins the duplicate it names");
+        check(result.blobsMerged == 0 && result.asmPinned == 1,
+              "the pinned blob is reported and nothing is merged");
+    }
+    {
+        cider::ir::Module module;
+        module.name = "main";
+        cider::ir::Function entry;
+        entry.name = "_start";
+        cider::ir::Block block;
+        block.label = 0;
+        cider::ir::Instr asmInstr;
+        asmInstr.op = cider::ir::Op::Asm;
+        asmInstr.asmText = "lea rax, [rip + s_1]";
+        block.body.push_back(std::move(asmInstr));
+        block.term.term = cider::ir::Term::Ret;
+        entry.blocks.push_back(std::move(block));
+        module.functions.push_back(std::move(entry));
+        module.rodata.push_back(dedupBlob("s_0", std::string("same\0", 5)));
+        module.rodata.push_back(dedupBlob("s_1", std::string("same\0", 5)));
+
+        cider::opt::RodataDedupResult result =
+            cider::opt::deduplicateRodata(module);
+        check(module.rodata.size() == 2,
+              "inline asm pins the duplicate it names");
+        check(result.blobsMerged == 0 && result.asmPinned == 1,
+              "inline-asm pinning is reported");
+        check(module.functions[0].blocks[0].body[0].asmText ==
+                  "lea rax, [rip + s_1]",
+              "assembly text is never rewritten");
+    }
+}
+
+void testRodataDedupAddressIdentity() {
+    std::printf("pointer-converted literals keep distinct addresses\n");
+    cider::ir::Module module;
+    module.name = "main";
+    cider::ir::Rodata pointer = dedupBlob("s_0", std::string("hi\0", 3));
+    pointer.addressIdentity = true;
+    module.rodata.push_back(std::move(pointer));
+    module.rodata.push_back(dedupBlob("s_1", std::string("hi\0", 3)));
+
+    cider::opt::RodataDedupResult result =
+        cider::opt::deduplicateRodata(module);
+    check(module.rodata.size() == 2,
+          "an address-identity blob is never merged");
+    check(result.blobsMerged == 0 && result.identityPinned == 1,
+          "the identity pin is reported and nothing is merged");
+
+    cider::ir::Module strings;
+    strings.name = "main";
+    strings.rodata.push_back(dedupBlob("s_0", std::string("hi\0", 3)));
+    strings.rodata.push_back(dedupBlob("s_1", std::string("hi\0", 3)));
+    cider::opt::RodataDedupResult merged =
+        cider::opt::deduplicateRodata(strings);
+    check(strings.rodata.size() == 1 && merged.blobsMerged == 1,
+          "the same bytes still merge when no address is observed");
+}
+
+void testRodataDedupDeterministic() {
+    std::printf("rodata dedup is deterministic\n");
+    cider::ir::Module first = dedupFixture();
+    cider::ir::Module second = dedupFixture();
+    cider::opt::RodataDedupResult firstResult =
+        cider::opt::deduplicateRodata(first);
+    cider::opt::RodataDedupResult secondResult =
+        cider::opt::deduplicateRodata(second);
+    check(firstResult.blobsMerged == secondResult.blobsMerged &&
+              firstResult.bytesRemoved == secondResult.bytesRemoved &&
+              firstResult.referencesRewritten ==
+                  secondResult.referencesRewritten,
+          "two identical modules report identical counters");
+    check(cider::ir::dumpModule(first) == cider::ir::dumpModule(second),
+          "two identical modules deduplicate byte-identically");
+
+    cider::ir::Module single;
+    single.name = "main";
+    single.rodata.push_back(dedupBlob("s_0", std::string("only\0", 5)));
+    cider::opt::RodataDedupResult singleResult =
+        cider::opt::deduplicateRodata(single);
+    check(single.rodata.size() == 1 && singleResult.blobsMerged == 0,
+          "a single blob is untouched");
+}
+
 // A non-zero displacement use marks the slot escaping, even though it still
 // names the same Alloca.
 void testDisplacementEscapes() {
@@ -1484,6 +1668,10 @@ int main() {
     testPhiStructureValid();
     testPhiStructureErrors();
     testPhiLowering();
+    testRodataDedup();
+    testRodataDedupPinsAssembly();
+    testRodataDedupAddressIdentity();
+    testRodataDedupDeterministic();
     testDisplacementEscapes();
     testDanglingTarget();
     testUnterminatedBlock();

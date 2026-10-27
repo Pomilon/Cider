@@ -309,6 +309,11 @@ struct Global {
 struct Rodata {
     std::string label;
     std::string bytes;
+    // True when lowering converted this literal's address to a byte pointer.
+    // Such a literal is an identity, not just bytes: CIDER-BUG-056 promises
+    // two `*u8` literals with equal bytes live at different addresses, so
+    // exact-byte deduplication must keep this blob as its own definition.
+    bool addressIdentity = false;
 };
 
 struct Module {
