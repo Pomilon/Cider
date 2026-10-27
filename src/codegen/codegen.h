@@ -9,11 +9,11 @@
 // kernel syscalls), and UEFI (Microsoft x64) assembly. Every other target is
 // refused with a diagnostic naming it, never silently approximated.
 //
-// Registers are not allocated here: every SSA value lives in its own stack
-// slot and the six scratch registers carry it between slot and operation.
-// Correct by construction and slow by design — a register allocator replaces
-// this file's strategy, not its interface, and nothing downstream may depend
-// on which slot a value got.
+// Every value still has its own stack slot, and the fixed scratch registers
+// carry it between slot and operation. A block-local linear scan may home an
+// eligible single-word value in a caller-saved register for its local live
+// range; the slot remains the complete fallback. Nothing downstream may
+// depend on which slot a value got or whether it was homed.
 
 #ifndef CIDER_CODEGEN_CODEGEN_H
 #define CIDER_CODEGEN_CODEGEN_H

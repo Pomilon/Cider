@@ -1,9 +1,10 @@
 // codegen.cpp — checked IR to x86-64 assembly (SysV; Linux/PomeOS services).
 //
 // Intel syntax with `.intel_syntax noprefix`, so plain `cc file.s` assembles
-// it. Every SSA value lives in its own stack slot and six scratch registers
-// carry values between slot and operation: correct by construction, slow by
-// design. A register allocator replaces this strategy, not its interface.
+// it. Every value keeps its own stack slot and fixed scratch registers carry
+// values between slot and operation. A block-local linear scan (regalloc.cpp)
+// homes eligible caller-saved values inside one block; everything else uses
+// the slot path unchanged.
 //
 // The text is a pure function of the module: no timestamps, no working
 // directories, no absolute paths. Gate L5.
@@ -11,10 +12,12 @@
 #include "codegen/codegen.h"
 
 #include <cstddef>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "codegen/regalloc.h"
 #include "layout.h"
 
 namespace cider {
@@ -448,9 +451,43 @@ private:
     // One slot per value id, eight bytes each. A slot holds a value extended
     // to 64 bits on store (sign or zero per the type), and every load reads
     // exactly the bytes its type names — so a narrow field never reads
-    // neighbor bytes, which is the defect v2's spill slots had.
+    // neighbor bytes, which is the defect v2's spill slots had. This remains
+    // the fallback for every value the local allocator does not home in a
+    // register, and the frame still reserves a cell for every id.
     std::string slot(uint32_t id) const {
         return "[rsp + " + std::to_string(id * 8) + "]";
+    }
+
+    // The register currently carrying a value in this block, or none. The
+    // allocator's map is per block; outside the block loop (the prologue,
+    // which writes parameter slots) it is null and every value is in memory.
+    uint8_t homeOf(uint32_t id) const {
+        if (currentHome_ == nullptr || id >= currentHome_->home.size()) {
+            return static_cast<uint8_t>(Register::None);
+        }
+        return currentHome_->home[id];
+    }
+
+    std::string regRef(uint8_t reg) const {
+        return registerName(static_cast<Register>(reg));
+    }
+
+    // A source operand: its home register when it has one, otherwise its
+    // frame slot. Every consumer of this helper expects a 64-bit value.
+    std::string valueRef(uint32_t id) const {
+        const uint8_t reg = homeOf(id);
+        return reg == static_cast<uint8_t>(Register::None) ? slot(id) : regRef(reg);
+    }
+
+    // A destination: write the already-computed 64-bit word to its home, or
+    // to the fallback slot.
+    void storeResult(uint32_t id, const std::string& source) {
+        const uint8_t reg = homeOf(id);
+        if (reg == static_cast<uint8_t>(Register::None)) {
+            out_ += "  mov " + slot(id) + ", " + source + "\n";
+        } else {
+            out_ += "  mov " + regRef(reg) + ", " + source + "\n";
+        }
     }
 
     // Appends a displacement to an address string, omitting +0: `[rip + g+0]`
@@ -698,7 +735,15 @@ private:
                 }
             }
         }
-        for (const ir::Block& block : fn.blocks) {
+        // A block-local linear scan. The allocation is an analysis only: the
+        // frame and every slot are still present, and a value without a home
+        // uses exactly the old stack path.
+        allocation_ = allocateFunction(fn);
+        for (uint32_t b = 0; b < fn.blocks.size(); ++b) {
+            const ir::Block& block = fn.blocks[b];
+            currentHome_ = b < allocation_.blocks.size()
+                               ? &allocation_.blocks[b]
+                               : nullptr;
             out_ += labelFor(fn.name, block.label) + ":\n";
             for (const ir::Instr& instr : block.body) {
                 if (!emitInstr(fn, instr)) {
@@ -709,6 +754,7 @@ private:
                 return false;
             }
         }
+        currentHome_ = nullptr;
         return !failed_;
     }
 
@@ -721,6 +767,20 @@ private:
             return false;
         }
         if (instr.op == ir::Op::Const) {
+            if (!instr.results.empty()) {
+                const uint8_t home = homeOf(instr.results[0].id);
+                if (home != static_cast<uint8_t>(Register::None)) {
+                    // A homed constant needs no rax round trip. The 32-bit
+                    // form sign-extends exactly as the rax spelling did.
+                    const bool fits32 =
+                        instr.constantBits >= INT32_MIN &&
+                        instr.constantBits <= INT32_MAX;
+                    out_ += std::string(fits32 ? "  mov " : "  movabs ") +
+                            regRef(home) + ", " +
+                            std::to_string(instr.constantBits) + "\n";
+                    return true;
+                }
+            }
             // 32-bit immediates encode directly; anything wider materialises
             // through rax, because x86 has no 64-bit-immediate-to-memory mov.
             if (instr.constantBits >= INT32_MIN && instr.constantBits <= INT32_MAX) {
@@ -729,13 +789,30 @@ private:
                 out_ += "  movabs rax, " + std::to_string(instr.constantBits) + "\n";
             }
             if (!instr.results.empty()) {
-                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                storeResult(instr.results[0].id, "rax");
             }
             return true;
         }
         if (instr.op == ir::Op::Copy) {
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            const uint8_t dest = homeOf(instr.results[0].id);
+            const uint8_t source = homeOf(instr.operands[0].id);
+            if (dest != static_cast<uint8_t>(Register::None)) {
+                // A register destination can copy directly from a register
+                // or a slot; this is the one-instruction copy path.
+                if (dest != source) {
+                    out_ += "  mov " + regRef(dest) + ", " +
+                            valueRef(instr.operands[0].id) + "\n";
+                }
+                return true;
+            }
+            if (source != static_cast<uint8_t>(Register::None)) {
+                // A slot destination can take a register source directly.
+                out_ += "  mov " + slot(instr.results[0].id) + ", " +
+                        regRef(source) + "\n";
+                return true;
+            }
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::Add || instr.op == ir::Op::Sub ||
@@ -758,9 +835,9 @@ private:
                     mnemonic = "mul";
                 }
                 out_ += "  mov" + std::string(suffix) + " xmm0, " +
-                        slot(instr.operands[0].id) + "\n";
+                        valueRef(instr.operands[0].id) + "\n";
                 out_ += "  " + std::string(mnemonic) + suffix + " xmm0, " +
-                        slot(instr.operands[1].id) + "\n";
+                        valueRef(instr.operands[1].id) + "\n";
                 out_ += "  mov" + std::string(suffix) + " " +
                         slot(instr.results[0].id) + ", xmm0\n";
                 return true;
@@ -793,13 +870,14 @@ private:
             bool isMul = instr.op == ir::Op::Mul;
             bool byteMul = isMul && (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8);
             if (byteMul) {
-                out_ += "  mov al, " + slot(instr.operands[0].id) + "\n";
+                out_ += "  mov al, " + valueRef(instr.operands[0].id) + "\n";
                 out_ += std::string(isSigned ? "  imul byte ptr " : "  mul byte ptr ") +
-                        slot(instr.operands[1].id) + "\n";
+                        valueRef(instr.operands[1].id) + "\n";
                 out_ += std::string(isSigned ? "  movsx eax, ax\n" : "  movzx eax, ax\n");
             } else {
-                out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
-                out_ += std::string("  ") + name + " rax, " + slot(instr.operands[1].id) + "\n";
+                out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
+                out_ += std::string("  ") + name + " rax, " +
+                        valueRef(instr.operands[1].id) + "\n";
                 if (narrow) {
                     if (instr.width == ir::IRType::I32 && isSigned) {
                         out_ += "  movsxd rax, eax\n";
@@ -815,7 +893,7 @@ private:
                     }
                 }
             }
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem) {
@@ -837,9 +915,9 @@ private:
                         ".L_" + fn.name + "_fprem_" +
                         std::to_string(instr.results[0].id);
                     out_ += "  fld " + std::string(mem) +
-                            slot(instr.operands[1].id) + "\n";
+                            valueRef(instr.operands[1].id) + "\n";
                     out_ += "  fld " + std::string(mem) +
-                            slot(instr.operands[0].id) + "\n";
+                            valueRef(instr.operands[0].id) + "\n";
                     out_ += again + ":\n";
                     out_ += "  fprem\n";
                     // fstsw, not fnstsw: the store must wait for fprem to
@@ -856,9 +934,9 @@ private:
                 const char* suffix =
                     instr.width == ir::IRType::F32 ? "ss" : "sd";
                 out_ += "  mov" + std::string(suffix) + " xmm0, " +
-                        slot(instr.operands[0].id) + "\n";
+                        valueRef(instr.operands[0].id) + "\n";
                 out_ += "  div" + std::string(suffix) + " xmm0, " +
-                        slot(instr.operands[1].id) + "\n";
+                        valueRef(instr.operands[1].id) + "\n";
                 out_ += "  mov" + std::string(suffix) + " " +
                         slot(instr.results[0].id) + ", xmm0\n";
                 return true;
@@ -871,68 +949,68 @@ private:
             bool isSigned = ir::signedWidth(instr.width, instr.type);
             bool wantQuotient = instr.op == ir::Op::Div;
             if (instr.width == ir::IRType::I64 || instr.width == ir::IRType::U64) {
-                out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+                out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
                 if (isSigned) {
                     out_ += "  cqo\n";
-                    out_ += "  idiv qword ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  idiv qword ptr " + valueRef(instr.operands[1].id) + "\n";
                 } else {
                     out_ += "  xor edx, edx\n";
-                    out_ += "  div qword ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  div qword ptr " + valueRef(instr.operands[1].id) + "\n";
                 }
                 if (wantQuotient) {
-                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    storeResult(instr.results[0].id, "rax");
                 } else {
                     out_ += "  mov " + slot(instr.results[0].id) + ", rdx\n";
                 }
                 return true;
             }
             if (instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32) {
-                out_ += "  mov eax, " + slot(instr.operands[0].id) + "\n";
+                out_ += "  mov eax, " + valueRef(instr.operands[0].id) + "\n";
                 if (isSigned) {
                     out_ += "  cdq\n";
-                    out_ += "  idiv dword ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  idiv dword ptr " + valueRef(instr.operands[1].id) + "\n";
                     out_ += wantQuotient ? "  movsxd rax, eax\n" : "  movsxd rdx, edx\n";
                 } else {
                     out_ += "  xor edx, edx\n";
-                    out_ += "  div dword ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  div dword ptr " + valueRef(instr.operands[1].id) + "\n";
                 }
                 if (wantQuotient) {
-                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    storeResult(instr.results[0].id, "rax");
                 } else {
                     out_ += "  mov " + slot(instr.results[0].id) + ", rdx\n";
                 }
                 return true;
             }
             if (instr.width == ir::IRType::I16 || instr.width == ir::IRType::U16) {
-                out_ += "  mov ax, " + slot(instr.operands[0].id) + "\n";
+                out_ += "  mov ax, " + valueRef(instr.operands[0].id) + "\n";
                 if (isSigned) {
                     out_ += "  cwd\n";
-                    out_ += "  idiv word ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  idiv word ptr " + valueRef(instr.operands[1].id) + "\n";
                     out_ += std::string(wantQuotient ? "  movsx eax, ax\n" : "  movsx edx, dx\n");
                 } else {
                     out_ += "  xor dx, dx\n";
-                    out_ += "  div word ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  div word ptr " + valueRef(instr.operands[1].id) + "\n";
                     out_ += std::string(wantQuotient ? "  movzx eax, ax\n" : "  movzx edx, dx\n");
                 }
                 if (wantQuotient) {
-                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    storeResult(instr.results[0].id, "rax");
                 } else {
                     out_ += "  mov " + slot(instr.results[0].id) + ", rdx\n";
                 }
                 return true;
             }
             if (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8) {
-                out_ += "  mov al, " + slot(instr.operands[0].id) + "\n";
+                out_ += "  mov al, " + valueRef(instr.operands[0].id) + "\n";
                 if (isSigned) {
                     out_ += "  cbw\n";
-                    out_ += "  idiv byte ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  idiv byte ptr " + valueRef(instr.operands[1].id) + "\n";
                     out_ += std::string(wantQuotient ? "  movsx eax, al\n" : "  movsx eax, ah\n");
-                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    storeResult(instr.results[0].id, "rax");
                 } else {
                     out_ += "  xor ah, ah\n";
-                    out_ += "  div byte ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += "  div byte ptr " + valueRef(instr.operands[1].id) + "\n";
                     out_ += std::string(wantQuotient ? "  movzx eax, al\n" : "  movzx eax, ah\n");
-                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    storeResult(instr.results[0].id, "rax");
                 }
                 return true;
             }
@@ -957,8 +1035,8 @@ private:
                 acc = "al";
                 ext = isSigned ? "movsx eax, al" : "movzx eax, al";
             }
-            out_ += std::string("  mov ") + acc + ", " + slot(instr.operands[0].id) + "\n";
-            out_ += "  mov rcx, " + slot(instr.operands[1].id) + "\n";
+            out_ += std::string("  mov ") + acc + ", " + valueRef(instr.operands[0].id) + "\n";
+            out_ += "  mov rcx, " + valueRef(instr.operands[1].id) + "\n";
             std::string op = "shl ";
             if (instr.op == ir::Op::Shr) {
                 op = isSigned ? "sar " : "shr ";
@@ -967,27 +1045,27 @@ private:
             if (ext != nullptr) {
                 out_ += std::string("  ") + ext + "\n";
             }
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::Neg) {
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
             out_ += "  neg rax\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::BitNot) {
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
             out_ += "  not rax\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::Not) {
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
             out_ += "  test rax, rax\n";
             out_ += "  setz al\n";
             out_ += "  movzx rax, al\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::Cmp) {
@@ -1006,9 +1084,9 @@ private:
                 const char* suffix = single ? "ss" : "sd";
                 const char* setcc = setFor(instr.cmp);
                 out_ += "  mov" + std::string(suffix) + " xmm0, " +
-                        slot(instr.operands[0].id) + "\n";
+                        valueRef(instr.operands[0].id) + "\n";
                 out_ += "  ucomi" + std::string(suffix) + " xmm0, " +
-                        slot(instr.operands[1].id) + "\n";
+                        valueRef(instr.operands[1].id) + "\n";
                 out_ += std::string("  ") + setcc + " al\n";
                 const std::string name = setcc;
                 if (name == "setne") {
@@ -1026,14 +1104,14 @@ private:
                     out_ += "  and al, cl\n";
                 }
                 out_ += "  movzx rax, al\n";
-                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                storeResult(instr.results[0].id, "rax");
                 return true;
             }
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
-            out_ += "  cmp rax, " + slot(instr.operands[1].id) + "\n";
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
+            out_ += "  cmp rax, " + valueRef(instr.operands[1].id) + "\n";
             out_ += std::string("  ") + setFor(instr.cmp) + " al\n";
             out_ += "  movzx rax, al\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         // A load or store names its place two ways: a global carries its link
@@ -1056,7 +1134,7 @@ private:
                 std::string base = "rsp + " + std::to_string(instr.addressBase.id * 8);
                 emitLoadMem(atAddr(base, instr.displacement), instr.type, instr.width);
             } else {
-                out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
+                out_ += "  mov rax, " + valueRef(instr.addressBase.id) + "\n";
                 emitNullCheck("rax");
                 emitLoadMem(atAddr("rax", instr.displacement), instr.type, instr.width);
             }
@@ -1065,12 +1143,12 @@ private:
             } else if (instr.width == ir::IRType::F64) {
                 out_ += "  movsd " + slot(instr.results[0].id) + ", xmm0\n";
             } else {
-                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                storeResult(instr.results[0].id, "rax");
             }
             return true;
         }
         if (instr.op == ir::Op::Store) {
-            out_ += "  mov rax, " + slot(instr.storedValue.id) + "\n";
+            out_ += "  mov rax, " + valueRef(instr.storedValue.id) + "\n";
             // Each width has its own SSE move: a float store that read four
             // bytes of a double would keep the low half of the bit pattern
             // and answer with the wrong value, so the spellings differ.
@@ -1086,7 +1164,7 @@ private:
                 std::string base = "rsp + " + std::to_string(instr.addressBase.id * 8);
                 emitStoreMem(atAddr(base, instr.displacement), instr.type, instr.width);
             } else {
-                out_ += "  mov rcx, " + slot(instr.addressBase.id) + "\n";
+                out_ += "  mov rcx, " + valueRef(instr.addressBase.id) + "\n";
                 emitNullCheck("rcx");
                 emitStoreMem(atAddr("rcx", instr.displacement), instr.type, instr.width);
             }
@@ -1102,14 +1180,14 @@ private:
                 out_ += "  lea rax, " + atAddr("rsp + " + std::to_string(instr.addressBase.id * 8),
                                                instr.displacement) + "\n";
             } else {
-                out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
+                out_ += "  mov rax, " + valueRef(instr.addressBase.id) + "\n";
                 if (instr.displacement != 0) {
                     out_ += "  add rax, " + std::to_string(instr.displacement) + "\n";
                 }
             }
-            out_ += "  mov rcx, " + slot(instr.operands[0].id) + "\n";
+            out_ += "  mov rcx, " + valueRef(instr.operands[0].id) + "\n";
             out_ += "  add rax, rcx\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::Alloca) {
@@ -1256,14 +1334,13 @@ private:
                 } else if (instr.width == ir::IRType::F64) {
                     out_ += "  movsd " + slot(instr.results[0].id) + ", xmm0\n";
                 } else {
-                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    storeResult(instr.results[0].id, "rax");
                 }
                 // The register row's second word comes home in rdx (IR.md
                 // §6): lowering refuses a third, so stopping here is
                 // complete, not truncation.
                 if (static_cast<uint64_t>(instr.results.size()) >= kTwoResults) {
-                    out_ += "  mov " + slot(instr.results[kSecondResult].id) +
-                            ", rdx\n";
+                    storeResult(instr.results[kSecondResult].id, "rdx");
                 }
             }
             return true;
@@ -1276,13 +1353,13 @@ private:
         }
         if (instr.op == ir::Op::DataAddr) {
             out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             addrWords_[instr.results[0].id] = asmSafeName(instr.globalLabel);
             return true;
         }
         if (instr.op == ir::Op::FnAddr) {
             out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         if (instr.op == ir::Op::Asm) {
@@ -1605,17 +1682,17 @@ private:
             const int toF = basicWidthBits(basicOf(to));
             if (fromFloat && toFloat) {
                 // Same width is a bit move; otherwise convert through xmm0.
-                out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+                out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
                 if (fromF == toF) {
-                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    storeResult(instr.results[0].id, "rax");
                     return true;
                 }
                 if (*from.type->basic() == BasicKind::F32) {
-                    out_ += "  movss xmm0, " + slot(instr.operands[0].id) + "\n";
+                    out_ += "  movss xmm0, " + valueRef(instr.operands[0].id) + "\n";
                     out_ += "  cvtss2sd xmm0, xmm0\n";
                     out_ += "  movsd " + slot(instr.results[0].id) + ", xmm0\n";
                 } else {
-                    out_ += "  movsd xmm0, " + slot(instr.operands[0].id) + "\n";
+                    out_ += "  movsd xmm0, " + valueRef(instr.operands[0].id) + "\n";
                     out_ += "  cvtsd2ss xmm0, xmm0\n";
                     out_ += "  movss " + slot(instr.results[0].id) + ", xmm0\n";
                 }
@@ -1632,7 +1709,7 @@ private:
                 const char* cvt = from32 ? "cvttss2si" : "cvttsd2si";
                 const char* move = from32 ? "movss" : "movsd";
                 out_ += "  " + std::string(move) + " xmm0, " +
-                        slot(instr.operands[0].id) + "\n";
+                        valueRef(instr.operands[0].id) + "\n";
                 const bool signedTarget = basicIsSigned(*to.type->basic());
                 if (toF == 64) {
                     out_ += "  " + std::string(cvt) + " rax, xmm0\n";
@@ -1651,7 +1728,7 @@ private:
                         }
                     }
                 }
-                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                storeResult(instr.results[0].id, "rax");
                 return true;
             }
             // int -> float: every integer producer keeps its value extended
@@ -1663,7 +1740,7 @@ private:
             const bool to32 = *to.type->basic() == BasicKind::F32;
             const char* cvt = to32 ? "cvtsi2ss" : "cvtsi2sd";
             const char* move = to32 ? "movss" : "movsd";
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
             if (from.type->kind() == Kind::Basic &&
                 *from.type->basic() == BasicKind::U64) {
                 std::string lbl =
@@ -1709,7 +1786,7 @@ private:
             !toPtr &&
             (to.type->kind() == Kind::Basic || to.type->kind() == Kind::Enum) &&
             basicIsSigned(basicOf(to));
-        out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+        out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
         if (fromBits == toBits) {
             // Same width, different signedness: the cell keeps the
             // source's extension, so re-extend through the target —
@@ -1726,7 +1803,7 @@ private:
                                    (basicIsSigned(basicOf(from)) !=
                                     basicIsSigned(basicOf(to)));
             if (!crossSign) {
-                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                storeResult(instr.results[0].id, "rax");
                 return true;
             }
             if (toBits == 8) {
@@ -1739,7 +1816,7 @@ private:
                 out_ += std::string(signedTarget ? "  movsxd rax, eax\n"
                                                  : "  mov eax, eax\n");
             }
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            storeResult(instr.results[0].id, "rax");
             return true;
         }
         const char* move = signedTarget ? "movsx" : "movzx";
@@ -1756,10 +1833,10 @@ private:
         // Narrowing first truncates through the source width: a 64-bit value
         // narrowed to u8 keeps its low byte, whatever the high bits held.
         if (fromBits > toBits) {
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
         }
         out_ += "  " + reg + "\n";
-        out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+        storeResult(instr.results[0].id, "rax");
         return true;
     }
 
@@ -1780,9 +1857,9 @@ private:
                 } else if (i == 0 && word.width == ir::IRType::F64) {
                     out_ += "  movsd xmm0, " + slot(word.id) + "\n";
                 } else if (i == 0) {
-                    out_ += "  mov rax, " + slot(word.id) + "\n";
+                    out_ += "  mov rax, " + valueRef(word.id) + "\n";
                 } else if (i == 1) {
-                    out_ += "  mov rdx, " + slot(word.id) + "\n";
+                    out_ += "  mov rdx, " + valueRef(word.id) + "\n";
                 } else {
                     refuse(term.loc, "a return wider than two words");
                     return false;
@@ -1797,7 +1874,7 @@ private:
             return true;
         }
         if (term.term == ir::Term::CondBr && term.cond.has_value()) {
-            out_ += "  mov rax, " + slot(term.cond->id) + "\n";
+            out_ += "  mov rax, " + valueRef(term.cond->id) + "\n";
             out_ += "  test rax, rax\n";
             out_ += "  jnz " + labelFor(fn.name, term.thenTarget) + "\n";
             out_ += "  jmp " + labelFor(fn.name, term.elseTarget) + "\n";
@@ -1835,6 +1912,10 @@ private:
     // paired with that word prints `[rip + label]` (the global's value)
     // instead of the temporary holding the address.
     std::unordered_map<uint32_t, std::string> addrWords_;
+    // One local allocation per function, and the block whose homes the
+    // current instruction is emitted under.
+    FunctionAllocation allocation_;
+    const BlockAllocation* currentHome_ = nullptr;
     std::string out_;
     // Unique suffix for u64-to-float conversion labels (int→float casts
     // need a two-path sequence; see emitCast).

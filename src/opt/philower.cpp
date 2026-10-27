@@ -1,9 +1,10 @@
 // philower.cpp — turn phi instructions into parallel edge copies for codegen.
 //
 // The optimized IR keeps phis so later passes can still see the SSA shape.
-// Codegen is stack-slot based and has no register allocator, so before it runs
-// this pass removes every phi and emits ordinary Copy instructions on the
-// incoming edge:
+// Codegen consumes ordinary values and refuses a phi, so before it runs this
+// pass removes every phi and emits ordinary Copy instructions on the incoming
+// edge. Codegen's local register allocator works over this lowered form, not
+// over the phi IR:
 //
 //   - a block with one reachable predecessor gets its copies at block entry;
 //   - every other predecessor gets its copies at the end of that predecessor,

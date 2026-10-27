@@ -81,10 +81,11 @@ OptResult run(ir::Module& module);
 PromotionResult mem2reg(ir::Module& module);
 
 // Replace phi nodes with parallel copies on the incoming edges, splitting
-// critical edges first. Codegen is stack-slot based and consumes ordinary
-// values, so the driver runs this after the optimizer and before generation;
-// `cider ir` and the VM keep the phi IR. Returns an error rather than
-// silently dropping a phi if an edge cannot be made single-entry.
+// critical edges first. Codegen consumes ordinary values and refuses a phi,
+// so the driver runs this after the optimizer and before generation; the
+// local register allocator then works over that lowered form. `cider ir` and
+// the VM keep the phi IR. Returns an error rather than silently dropping a
+// phi if an edge cannot be made single-entry.
 PhiLowerResult lowerPhis(ir::Module& module);
 
 // Constant folding. Folds only what is provably the same: no overflow, no

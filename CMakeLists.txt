@@ -195,9 +195,11 @@ add_test(NAME vm COMMAND vm_test)
 # --- Codegen ---------------------------------------------------------------------
 #
 # LAYERS.md 3.7: checked IR to assembly. Reads the IR and the target, never the
-# AST (gate L2). Registers are not allocated: every value has a stack slot.
+# AST (gate L2). Every value keeps a frame slot; a block-local linear scan may
+# home an eligible value in a caller-saved register for its local live range.
 
-add_library(cider_codegen STATIC src/codegen/codegen.cpp)
+add_library(cider_codegen STATIC src/codegen/codegen.cpp
+                                src/codegen/regalloc.cpp)
 target_link_libraries(cider_codegen PUBLIC cider_ir cider_types cider_target)
 target_include_directories(cider_codegen PUBLIC src)
 
@@ -205,6 +207,13 @@ add_executable(codegen_test tests/unit/codegen_test.cpp)
 target_link_libraries(codegen_test PRIVATE cider_codegen cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(codegen_test PRIVATE src)
 add_test(NAME codegen COMMAND codegen_test)
+
+# The local linear scan is an analysis; this test pins its refusal scope and
+# per-ABI pools without assembling anything.
+add_executable(regalloc_test tests/unit/regalloc_test.cpp)
+target_link_libraries(regalloc_test PRIVATE cider_codegen cider_ir cider_types)
+target_include_directories(regalloc_test PRIVATE src)
+add_test(NAME regalloc COMMAND regalloc_test)
 
 # --- The driver --------------------------------------------------------------------
 #
@@ -315,6 +324,15 @@ add_test(NAME v4_slot_forwarding
 set_tests_properties(v4_slot_forwarding PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Task 5's first slice: block-local caller-saved homes, spill-on-pressure,
+# barrier refusal, per-ABI pools. Native programs prove behavior; the msabi
+# assembly check proves rdi/rsi stay out of the UEFI pool.
+add_test(NAME v4_register_allocation
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/register_allocation_test.py)
+set_tests_properties(v4_register_allocation PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its
@@ -339,7 +357,7 @@ add_test(NAME target COMMAND target_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen vm driver target
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen regalloc vm driver target
              PROPERTIES LABELS "gate")
 
 # --- Opt-in UEFI smoke ---------------------------------------------------------
