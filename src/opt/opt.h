@@ -39,6 +39,24 @@ struct OptResult {
     uint64_t phis = 0;
     uint64_t loadsPromoted = 0;
     uint64_t storesPromoted = 0;
+    // Inlining counters. `clonedInstructions` counts every instruction the
+    // inline added to a caller: cloned body instructions, the fresh parameter
+    // Alloca/Store pairs, and return phis. `inliningSkipped` counts calls the
+    // pass considered in a reachable caller block and refused: indirect,
+    // missing/extern, direct-recursive, asm, over the cap, a shape it cannot
+    // map, or a per-caller budget. Calls in unreachable blocks and inside
+    // cloned bodies are not scanned, so they are not counted.
+    uint64_t inlined = 0;
+    uint64_t clonedInstructions = 0;
+    uint64_t inliningSkipped = 0;
+};
+
+// What one inlining run did. Kept separate from OptResult so the pass is
+// testable without the rest of the pipeline.
+struct InlineResult {
+    uint64_t inlined = 0;
+    uint64_t clonedInstructions = 0;
+    uint64_t skipped = 0;
 };
 
 // What one slot-forwarding run did. Kept separate from OptResult so the
@@ -65,11 +83,21 @@ struct PhiLowerResult {
     uint64_t copies = 0;
 };
 
-// Structural check, then mem2reg, then fold, then slot forwarding, then
-// dead-code elimination. Mem2reg first exposes the SSA values that folding
-// can use; forwarding still covers every slot mem2reg left in memory; the
-// check first means none of the passes reads garbage.
+// Structural check, then inlining, then a second structural check, then
+// mem2reg, fold, slot forwarding, and dead-code elimination. Inlining first
+// gives mem2reg the cloned parameter slots to promote; the second check
+// refuses a malformed clone instead of letting a later pass read it.
 OptResult run(ir::Module& module);
+
+// Clone small direct, same-module callees at their call sites, one level per
+// call site. Parameters become fresh Alloca slots plus explicit Stores of the
+// flattened call-argument words, so the following mem2reg can promote them.
+// Direct self-recursive callees, callees containing asm, extern/missing
+// callees, indirect calls, callees over 80 instructions or 16 blocks, and
+// calls whose ABI disagrees with the caller are refused. Returns counters for
+// inlined sites and added instructions; a refused call is counted as skipped
+// and its IR is untouched.
+InlineResult inlineCalls(ir::Module& module);
 
 // Promote non-escaping single-word scalar Alloca slots to SSA values with
 // phi nodes at dominance-frontier joins. This is the full Cytron algorithm:

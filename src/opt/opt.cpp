@@ -1,10 +1,13 @@
-// opt.cpp — mem2reg, fold, forward slots, then dead-code elimination.
+// opt.cpp — inline, mem2reg, fold, forward slots, then dead-code elimination.
 //
-// Mem2reg first turns straight-line and phi-joined slot traffic into SSA, so
-// folding sees more constants; forwarding still covers every slot mem2reg
-// left in memory; DCE last deletes the values all three orphaned. The
-// structural check first means no pass reads garbage. Each pass preserves the
-// seven rows of IR.md §7, and each row below says how.
+// Inlining first clones small direct callees and gives their parameter words
+// fresh slots, so mem2reg can promote the cloned traffic. Mem2reg then turns
+// straight-line and phi-joined slot traffic into SSA, so folding sees more
+// constants; forwarding still covers every slot mem2reg left in memory; DCE
+// last deletes the values every pass orphaned. The structural check runs
+// before any pass and again after inlining, so no pass reads garbage and a
+// malformed clone fails cleanly. Each pass preserves the seven rows of IR.md
+// §7, and each row below says how.
 
 #include "opt/opt.h"
 
@@ -474,6 +477,18 @@ OptResult run(ir::Module& module) {
                          0, 0};
     }
     OptResult result{true, "", 0, 0};
+    InlineResult inlining = inlineCalls(module);
+    result.inlined = inlining.inlined;
+    result.clonedInstructions = inlining.clonedInstructions;
+    result.inliningSkipped = inlining.skipped;
+    bad = checkModule(module);
+    if (!bad.empty()) {
+        const StructuralError& first = bad[0];
+        result.ok = false;
+        result.error = "after inline " + first.function + ":" +
+                       std::to_string(first.block) + ": " + first.message;
+        return result;
+    }
     PromotionResult promotion = mem2reg(module);
     result.promoted = promotion.promotedSlots;
     result.phis = promotion.phisInserted;

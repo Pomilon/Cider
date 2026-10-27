@@ -168,7 +168,8 @@ add_test(NAME lowering COMMAND lower_test)
 
 add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/memory.cpp src/opt/mem2reg.cpp
-                               src/opt/philower.cpp src/opt/opt.cpp)
+                               src/opt/inline.cpp src/opt/philower.cpp
+                               src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 
@@ -176,6 +177,11 @@ add_executable(opt_test tests/unit/opt_test.cpp)
 target_link_libraries(opt_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(opt_test PRIVATE src)
 add_test(NAME optimise COMMAND opt_test)
+
+add_executable(inline_test tests/unit/inline_test.cpp)
+target_link_libraries(inline_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(inline_test PRIVATE src)
+add_test(NAME inline COMMAND inline_test)
 
 # --- The interpreter -----------------------------------------------------------
 #
@@ -333,6 +339,16 @@ add_test(NAME v4_register_allocation
 set_tests_properties(v4_register_allocation PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Task 4's second optimizer slice: small direct callees are cloned before
+# mem2reg, so parameter slots and return joins promote. Native and both VM legs
+# pin parameters, side-effect order, two returns, multiword and sret answers,
+# a loop call, and the recursion refusal; two compiles pin stable assembly.
+add_test(NAME v4_inlining
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/inlining_test.py)
+set_tests_properties(v4_inlining PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its
@@ -357,7 +373,7 @@ add_test(NAME target COMMAND target_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen regalloc vm driver target
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline codegen regalloc vm driver target
              PROPERTIES LABELS "gate")
 
 # --- Opt-in UEFI smoke ---------------------------------------------------------

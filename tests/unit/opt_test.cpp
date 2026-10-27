@@ -682,9 +682,10 @@ void testMem2RegParameter() {
           "the parameter value carries the scalar type");
 }
 
-// Calls stay calls; a scalar local around one still promotes.
+// The inliner now removes this small call before mem2reg; the scalar slots
+// around it still promote, so the pipeline result is a call-free function.
 void testMem2RegCall() {
-    std::printf("mem2reg keeps calls while promoting their result\n");
+    std::printf("mem2reg promotes around a call the inliner removes\n");
     Piped r = pipe(
         "func g(a: int) -> int { return a + 1; }\n"
         "func f(a: int) -> int {\n"
@@ -698,8 +699,9 @@ void testMem2RegCall() {
     if (fn == nullptr) {
         return;
     }
+    check(r.opt.inlined == 1, "the small call was inlined");
     check(r.opt.promoted >= 2, "the parameter and local are promoted");
-    check(countOp(*fn, cider::ir::Op::Call) == 1, "the call survives");
+    check(countOp(*fn, cider::ir::Op::Call) == 0, "the call is gone");
     check(countOp(*fn, cider::ir::Op::Alloca) == 0, "no Alloca remains");
     check(countOp(*fn, cider::ir::Op::Load) == 0, "no Load remains");
     check(countOp(*fn, cider::ir::Op::Store) == 0, "no Store remains");

@@ -3119,19 +3119,27 @@ void testRegisterEscape() {
     bool sig = false;
     // `cs` is a segment register: GAS rejects every textual reference
     // to the bare spelling, so the emitter renames the symbol at every
-    // site that names it.
-    check(runCode("func cs() -> int { return 8; }\n"
+    // site that names it. The `nop` inside each callee keeps the inliner
+    // from removing the call this test exists to spell; a callee containing
+    // asm is deliberately out of the inliner's reach.
+    check(runCode("func cs() -> int { asm { \"nop\" } return 8; }\n"
                   "func main() -> int { return cs(); }\n",
                   sig) == 8 && !sig,
           "a function named like a register still calls");
     // `add` is only a mnemonic: GAS accepts it bare, so the emitter
     // keeps the spelling instead of renaming every function.
-    check(runCode("func add(a: int, b: int) -> int { return a + b; }\n"
+    check(runCode("func add(a: int, b: int) -> int {\n"
+                  "    asm { \"nop\" }\n"
+                  "    return a + b;\n"
+                  "}\n"
                   "func main() -> int { return add(20, 22); }\n",
                   sig) == 42 && !sig,
           "a function named like a mnemonic keeps its spelling");
-    Built text = build("func cs() -> int { return 8; }\n"
-                       "func add(a: int, b: int) -> int { return a + b; }\n"
+    Built text = build("func cs() -> int { asm { \"nop\" } return 8; }\n"
+                       "func add(a: int, b: int) -> int {\n"
+                       "    asm { \"nop\" }\n"
+                       "    return a + b;\n"
+                       "}\n"
                        "func main() -> int { return cs() + add(1, 1); }\n");
     check(text.ok, "the escape program builds");
     check(text.asmText.find("call cs_") != std::string::npos,

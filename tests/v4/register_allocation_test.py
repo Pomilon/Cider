@@ -179,10 +179,14 @@ func _start() -> void {
 }
 """, 33),
 
-    "global_call": ("""func bump2(x: i32) -> i32 { return x + 1; }
+    "global_call": ("""func bump2(x: i32) -> i32 {
+    asm { "nop" }
+    return x + 1;
+}
 
 func bump(x: i32) -> i32 {
     var t: i32 = x + 1;
+    if (x == 2147483647) { return bump(x); }
     if (x > 0) { return t + bump2(x); } else { return t + 2; }
 }
 
@@ -199,7 +203,10 @@ func _start() -> void {
 }
 """, 54),
 
-    "global_pressure": ("""func callee(x: i32) -> i32 { return x + 1; }
+    "global_pressure": ("""func callee(x: i32) -> i32 {
+    asm { "nop" }
+    return x + 1;
+}
 
 func pressure_global(x: i32) -> i32 {
     var a: i32 = x + 1;
@@ -219,7 +226,10 @@ func _start() -> void {
 }
 """, 22),
 
-    "global_loop_call": ("""func bump(x: i32) -> i32 { return x + 1; }
+    "global_loop_call": ("""func bump(x: i32) -> i32 {
+    asm { "nop" }
+    return x + 1;
+}
 
 func loop_call(n: i32) -> i32 {
     var step: i32 = n + 1;
@@ -276,6 +286,7 @@ msabi func efi_main(image_handle: *void, system_table: *void) -> int {
 """
 
 UEFI_GLOBAL_SOURCE = """msabi func helper(x: i32) -> i32 {
+    asm { "nop" }
     return x + 1;
 }
 
@@ -296,6 +307,7 @@ msabi func efi_main(image_handle: *void, system_table: *void) -> int {
 """
 
 POMEOS_GLOBAL_SOURCE = """func probe() -> int {
+    asm { "nop" }
     return 1;
 }
 
