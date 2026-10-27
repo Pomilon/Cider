@@ -108,8 +108,8 @@ void testCompileIr() {
     if (asmFile != nullptr) {
         fclose(asmFile);
     }
-    check(got > 0 && std::string(head).find("main:") != std::string::npos,
-          "the assembly defines main");
+    check(got > 0 && std::string(head).find("_start:") != std::string::npos,
+          "the assembly defines the entry");
     Result dumped = run({"ir", src});
     check(dumped.code == 0, "dumps: " + dumped.err);
     // `40 + 2` folds to one const before the dump, so ask for a dump with an
@@ -602,7 +602,7 @@ void testNativeTargetAliases() {
         if (asmFile != nullptr) {
             fclose(asmFile);
         }
-        check(got > 0 && std::string(head).find("main:") != std::string::npos,
+        check(got > 0 && std::string(head).find("_start:") != std::string::npos,
               std::string("--target ") + alias + " emits native assembly");
         unlink(asmPath);
     }

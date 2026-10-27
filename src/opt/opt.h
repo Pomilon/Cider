@@ -106,6 +106,15 @@ struct LicmResult {
     uint64_t skipped = 0;
 };
 
+// Whole-program function pruning. This is deliberately separate from the
+// instruction-level `deadCode` pass: it removes unreachable definitions, not
+// unused values, and it must only run when every source module is present.
+struct FunctionPruneResult {
+    uint64_t functionsRemoved = 0;
+    uint64_t instructionsRemoved = 0;
+    bool skipped = false;
+};
+
 // What phi lowering did for codegen.
 struct PhiLowerResult {
     bool ok = false;
@@ -189,6 +198,11 @@ GvnResult valueNumber(ir::Module& module);
 // asm, phis, casts and float operations never move. No block is created,
 // split, reordered or relabelled.
 LicmResult loopInvariantCodeMotion(ir::Module& module);
+
+// Remove function definitions that the entry cannot reach. Globals and
+// rodata are kept; callers must restrict this to whole-program builds, where
+// every source module is present and no external object can import a symbol.
+FunctionPruneResult pruneFunctions(ir::Module& module, const std::string& entry);
 
 // Dead-code elimination. Deletes a definition only when every result is
 // unused, the instruction is pure, it cannot trap, and it is not volatile.

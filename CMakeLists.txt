@@ -170,7 +170,7 @@ add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/memory.cpp src/opt/mem2reg.cpp
                                src/opt/inline.cpp src/opt/gvn.cpp
                                src/opt/licm.cpp src/opt/philower.cpp
-                               src/opt/opt.cpp)
+                               src/opt/dce.cpp src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 
@@ -193,6 +193,11 @@ add_executable(licm_test tests/unit/licm_test.cpp)
 target_link_libraries(licm_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(licm_test PRIVATE src)
 add_test(NAME licm COMMAND licm_test)
+
+add_executable(dce_test tests/unit/dce_test.cpp)
+target_link_libraries(dce_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(dce_test PRIVATE src)
+add_test(NAME dce COMMAND dce_test)
 
 # --- The interpreter -----------------------------------------------------------
 #

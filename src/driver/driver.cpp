@@ -351,6 +351,10 @@ struct FrontOptions {
     // Whole-program is the existing compile/run path: every resolved module
     // lowers into one IR module. A split-module object lowers only `module`.
     bool wholeProgram = true;
+    // Remove function definitions the target entry cannot reach. Only
+    // whole-program executable builds set this; split objects keep every
+    // definition for other objects to reference.
+    bool pruneUnused = false;
     // A non-entry module object mangles every definition, including this
     // file's, so its names match the importing entry object's references.
     bool mangleAll = false;
@@ -706,6 +710,9 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     if (!result.ok) {
         pipe.diagnostic += file + ": " + result.error + "\n";
         return false;
+    }
+    if (opts.pruneUnused) {
+        opt::pruneFunctions(*pipe.module, target::info(opts.targetKind).entry);
     }
     faultAlloc("opt");
     pipe.ok = true;
@@ -1886,6 +1893,12 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     opts.checks = checks;
     opts.requireEntry = requireEntry;
     opts.wholeProgram = !split;
+    // A whole-program executable has every source module in hand, so the
+    // entry is the only root that must survive. Split objects may be linked
+    // against other objects, so they keep every definition.
+    opts.pruneUnused = opts.wholeProgram && !opts.noOpt &&
+                       ((command == "compile" && !objectMode) ||
+                        command == "run");
     opts.mangleAll = mangleAll;
     opts.module = module;
     opts.useInterfaces = !interfaceDir.empty();

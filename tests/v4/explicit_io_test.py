@@ -34,6 +34,7 @@ UNDECLARED = """func _start() -> void {
 
 EXPLICIT = """from std.io import print, putchar, exit;
 
+
 func _start() -> void {
     var wrote: int = putchar(67);
     if (wrote != 67) {
@@ -167,7 +168,7 @@ def main():
         io_asm = os.path.join(tmp, "io.s")
         io_obj = os.path.join(tmp, "io.o")
         io_bin = os.path.join(tmp, "io.bin")
-        compiled = run([CIDER, "compile", io_src, "-o", io_asm],
+        compiled = run([CIDER, "compile", "--no-opt", io_src, "-o", io_asm],
                        env=library_env())
         if compiled.returncode != 0:
             failures.append("explicit std.io compile: " + describe(compiled))

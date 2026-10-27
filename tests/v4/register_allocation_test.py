@@ -124,7 +124,9 @@ func _start() -> void {
 }
 """, 84),
 
-    "multiword_float": ("""func pair() -> [u64; 2] {
+    "multiword_float": ("""var keep_pair: *void = &pair as *void;
+
+func pair() -> [u64; 2] {
     var r: [u64; 2] = [11, 22];
     return r;
 }
@@ -149,7 +151,9 @@ func _start() -> void {
 }
 """, 45),
 
-    "global_branch": ("""func branchy(x: i32) -> i32 {
+    "global_branch": ("""var keep_branchy: *void = &branchy as *void;
+
+func branchy(x: i32) -> i32 {
     var base: i32 = x * 3;
     var r: i32 = 0;
     if (x > 0) { r = base + 1; } else { r = base + 2; }
@@ -162,7 +166,9 @@ func _start() -> void {
 }
 """, 43),
 
-    "global_loop": ("""func loop_global(n: i32) -> i32 {
+    "global_loop": ("""var keep_loop: *void = &loop_global as *void;
+
+func loop_global(n: i32) -> i32 {
     var step: i32 = 3;
     var i: i32 = 0;
     var s: i32 = 0;
