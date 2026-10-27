@@ -444,6 +444,35 @@ void testGlobalAcrossCall() {
           "one callee-saved home and one global spill");
 }
 
+void testGlobalTerminatorUseAcrossCall() {
+    std::printf("a terminator-only value across a call\n");
+    Fn f;
+    for (uint32_t label = 1; label <= 3; ++label) {
+        cider::ir::Block block;
+        block.label = label;
+        f.fn.blocks.push_back(std::move(block));
+    }
+    f.add(0, define(cider::ir::Op::Const, 0));
+    f.term(0, 1);
+    cider::ir::Instr call;
+    call.op = cider::ir::Op::Call;
+    call.callee = "g";
+    f.add(1, std::move(call));
+    f.fn.blocks[1].term.term = cider::ir::Term::CondBr;
+    f.fn.blocks[1].term.cond = value(0);
+    f.fn.blocks[1].term.thenTarget = 2;
+    f.fn.blocks[1].term.elseTarget = 3;
+    f.fn.blocks[2].term.term = cider::ir::Term::Ret;
+    f.fn.blocks[3].term.term = cider::ir::Term::Ret;
+
+    const auto alloc = cider::codegen::allocateFunction(f.fn);
+    check(homeOf(alloc, 0, 0) == cider::codegen::Register::Rbx &&
+              homeOf(alloc, 1, 0) == cider::codegen::Register::Rbx,
+          "a value read by the terminator after a call takes rbx");
+    check(hasCalleeSaved(alloc, cider::codegen::Register::Rbx),
+          "the allocation saves the callee-saved home");
+}
+
 void testGlobalAsmAndVolatileBarriers() {
     std::printf("global asm and volatile barriers\n");
     {
@@ -694,6 +723,7 @@ int main() {
     testGlobalBranchMerge();
     testGlobalLoopCarried();
     testGlobalAcrossCall();
+    testGlobalTerminatorUseAcrossCall();
     testGlobalAsmAndVolatileBarriers();
     testGlobalMultipleDefinitions();
     testGlobalRegisterReuse();

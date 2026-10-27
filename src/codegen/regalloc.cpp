@@ -558,8 +558,23 @@ GlobalPlan planGlobals(const ir::Function& fn,
             continue;
         }
         const ir::Block& block = fn.blocks[b];
-        std::unordered_set<uint32_t> live = plan.liveOut[b];
+        // Terminator uses are live at every instruction in the block: a call
+        // earlier in the body can clobber a caller-saved register that the
+        // terminator reads. Seeding the backward scan with them is what lets
+        // the barrier test mark such a value as crossing; leaving them only
+        // in the interference clique below gave a terminator-only value a
+        // caller-saved home and a call then overwrote it.
+        std::vector<uint32_t> termUses;
         std::vector<uint32_t> scratch;
+        scratch.clear();
+        appendTermUses(block.term, scratch);
+        for (uint32_t id : scratch) {
+            addCandidate(termUses, id, plan.candidates);
+        }
+        std::unordered_set<uint32_t> live = plan.liveOut[b];
+        for (uint32_t id : termUses) {
+            live.insert(id);
+        }
         for (auto at = block.body.rbegin(); at != block.body.rend(); ++at) {
             const ir::Instr& instr = *at;
             // A trap is terminal: the instructions after it never execute, and
@@ -608,12 +623,6 @@ GlobalPlan planGlobals(const ir::Function& fn,
         // Values used by the terminator and values live out of the block are
         // simultaneously needed: a condition, a switch word or a return word
         // must not share a home with the value it chooses or returns.
-        std::vector<uint32_t> termUses;
-        scratch.clear();
-        appendTermUses(block.term, scratch);
-        for (uint32_t id : scratch) {
-            addCandidate(termUses, id, plan.candidates);
-        }
         std::unordered_set<uint32_t> atTerm = plan.liveOut[b];
         for (uint32_t id : termUses) {
             atTerm.insert(id);
