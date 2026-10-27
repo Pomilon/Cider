@@ -64,6 +64,15 @@ struct OptResult {
     uint64_t licmLoops = 0;
     uint64_t licmHoisted = 0;
     uint64_t licmSkipped = 0;
+    // Control-flow simplification counters. `branchesFolded` counts CondBr
+    // and Switch terminators replaced by Br; `blocksRemoved` counts blocks no
+    // longer reachable from the entry; `phisSimplified` counts single-incoming
+    // phis deleted and replaced by their value; `phiIncomingRemoved` counts
+    // individual incoming entries dropped from surviving phis.
+    uint64_t branchesFolded = 0;
+    uint64_t blocksRemoved = 0;
+    uint64_t phisSimplified = 0;
+    uint64_t phiIncomingRemoved = 0;
 };
 
 // What one inlining run did. Kept separate from OptResult so the pass is
@@ -106,6 +115,15 @@ struct LicmResult {
     uint64_t skipped = 0;
 };
 
+// What one control-flow simplification run did. Kept separate from OptResult
+// so the pass is testable without the rest of the pipeline.
+struct SimplifyResult {
+    uint64_t branchesFolded = 0;
+    uint64_t blocksRemoved = 0;
+    uint64_t phisSimplified = 0;
+    uint64_t phiIncomingRemoved = 0;
+};
+
 // Whole-program function pruning. This is deliberately separate from the
 // instruction-level `deadCode` pass: it removes unreachable definitions, not
 // unused values, and it must only run when every source module is present.
@@ -138,12 +156,13 @@ struct PhiLowerResult {
 };
 
 // Structural check, then inlining, then a second structural check, then
-// mem2reg, fold, dominance-scoped value numbering, loop-invariant code motion,
-// slot forwarding, and dead-code elimination. Inlining first gives mem2reg the
-// cloned parameter slots to promote; the second check refuses a malformed
-// clone instead of letting a later pass read it; the third check after value
-// numbering catches a malformed use rewrite, and the fourth after LICM catches
-// a malformed move, before any later pass or codegen sees it.
+// mem2reg, fold, control-flow simplification, dominance-scoped value
+// numbering, loop-invariant code motion, slot forwarding, and dead-code
+// elimination. Inlining first gives mem2reg the cloned parameter slots to
+// promote; the second check refuses a malformed clone instead of letting a
+// later pass read it; the third check after simplification and the fourth
+// after value numbering catch a malformed rewrite, and the fifth after LICM
+// catches a malformed move, before any later pass or codegen sees it.
 OptResult run(ir::Module& module);
 
 // Clone small direct, same-module callees at their call sites, one level per
@@ -177,6 +196,18 @@ PhiLowerResult lowerPhis(ir::Module& module);
 // division by zero, no out-of-range shift. Anything else stays for runtime,
 // where the trap semantics live.
 uint64_t foldConsts(ir::Module& module);
+
+// Constant control-flow simplification over the phi IR. A CondBr whose tested
+// value resolves to a constant becomes a Br on the taken edge; a Switch whose
+// value resolves selects the first matching case or the default and becomes a
+// Br. Constants are followed only through Const, same-width/type Copy, and Phi
+// values that all agree; loads, calls, asm, casts and trapping operations are
+// never guessed at. Blocks unreachable from the entry are removed, surviving
+// phis lose the incoming entries for vanished edges, and a phi left with one
+// incoming is replaced by that value and deleted. Reachable instructions are
+// never deleted or moved, and block order is preserved. Runs after foldConsts
+// and before valueNumber; the pipeline checks the result structurally.
+SimplifyResult simplifyControlFlow(ir::Module& module);
 
 // Conservative load/store forwarding for non-escaping Alloca slots. After
 // mem2reg this is the fallback for slots that stay in memory: no phi nodes and

@@ -1,18 +1,21 @@
-// opt.cpp — inline, mem2reg, fold, value-number, hoist loop invariants,
-// forward slots, then dead-code elimination.
+// opt.cpp — inline, mem2reg, fold, simplify control flow, value-number, hoist
+// loop invariants, forward slots, then dead-code elimination.
 //
 // Inlining first clones small direct callees and gives their parameter words
 // fresh slots, so mem2reg can promote the cloned traffic. Mem2reg then turns
 // straight-line and phi-joined slot traffic into SSA, so folding sees more
-// constants. Value numbering runs on the phi IR after folding and before slot
-// forwarding: it removes duplicate pure expressions across dominated blocks.
-// LICM follows value numbering so it moves the one surviving copy of an
-// invariant expression to a preheader, and before slot forwarding and DCE so
-// those passes see the final placement. Slot forwarding still sees every
-// remaining load/store, and DCE deletes the values every pass orphaned. The
-// structural check runs before any pass, again after inlining, again after
-// value numbering, and again after LICM, so no pass reads garbage and a
-// malformed rewrite fails cleanly. Each pass preserves the seven rows of
+// constants. Control-flow simplification consumes those constants: it folds
+// provably-taken branches, drops unreachable blocks, and collapses the phis
+// those blocks leave behind, which exposes still more constants. Value
+// numbering then runs on the smaller phi IR and before slot forwarding, so it
+// removes duplicate pure expressions across dominated blocks. LICM follows
+// value numbering so it moves the one surviving copy of an invariant
+// expression to a preheader, and before slot forwarding and DCE so those
+// passes see the final placement. Slot forwarding still sees every remaining
+// load/store, and DCE deletes the values every pass orphaned. The structural
+// check runs before any pass, again after inlining, again after simplification,
+// again after value numbering, and again after LICM, so no pass reads garbage
+// and a malformed rewrite fails cleanly. Each pass preserves the seven rows of
 // IR.md §7, and each row below says how.
 
 #include "opt/opt.h"
@@ -501,6 +504,19 @@ OptResult run(ir::Module& module) {
     result.loadsPromoted = promotion.loadsReplaced;
     result.storesPromoted = promotion.storesRemoved;
     result.folded = foldConsts(module);
+    SimplifyResult simplify = simplifyControlFlow(module);
+    result.branchesFolded = simplify.branchesFolded;
+    result.blocksRemoved = simplify.blocksRemoved;
+    result.phisSimplified = simplify.phisSimplified;
+    result.phiIncomingRemoved = simplify.phiIncomingRemoved;
+    bad = checkModule(module);
+    if (!bad.empty()) {
+        const StructuralError& first = bad[0];
+        result.ok = false;
+        result.error = "after simplify " + first.function + ":" +
+                       std::to_string(first.block) + ": " + first.message;
+        return result;
+    }
     GvnResult gvn = valueNumber(module);
     result.expressionsRemoved = gvn.expressionsRemoved;
     result.usesRedirected = gvn.usesRedirected;

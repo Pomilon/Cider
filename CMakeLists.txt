@@ -169,8 +169,9 @@ add_test(NAME lowering COMMAND lower_test)
 add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/memory.cpp src/opt/mem2reg.cpp
                                src/opt/inline.cpp src/opt/gvn.cpp
-                               src/opt/licm.cpp src/opt/philower.cpp
-                               src/opt/dce.cpp src/opt/opt.cpp)
+                               src/opt/licm.cpp src/opt/simplify.cpp
+                               src/opt/philower.cpp src/opt/dce.cpp
+                               src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 
@@ -193,6 +194,11 @@ add_executable(licm_test tests/unit/licm_test.cpp)
 target_link_libraries(licm_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(licm_test PRIVATE src)
 add_test(NAME licm COMMAND licm_test)
+
+add_executable(simplify_test tests/unit/simplify_test.cpp)
+target_link_libraries(simplify_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(simplify_test PRIVATE src)
+add_test(NAME simplify COMMAND simplify_test)
 
 add_executable(dce_test tests/unit/dce_test.cpp)
 target_link_libraries(dce_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
@@ -394,6 +400,16 @@ add_test(NAME v4_global_pruning
 set_tests_properties(v4_global_pruning PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Constant control-flow simplification: source-level constant if/else branches
+# lose their dead arms, unreachable block labels disappear from assembly, a
+# nonconstant loop branch survives, and native plus both VM legs agree. Switch
+# terminators have no source syntax in this slice; the unit test pins them.
+add_test(NAME v4_simplify
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/simplify_test.py)
+set_tests_properties(v4_simplify PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its
@@ -418,7 +434,7 @@ add_test(NAME target COMMAND target_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline gvn licm codegen regalloc vm driver target
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline gvn licm simplify codegen regalloc vm driver target
              PROPERTIES LABELS "gate")
 
 # --- Opt-in UEFI smoke ---------------------------------------------------------
