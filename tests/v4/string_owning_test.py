@@ -24,6 +24,7 @@ from std.string import String, string_from, string_deinit;
 from std.string import string_append, string_append_byte, string_append_int;
 from std.string import string_append_bytes, string_view, string_len, format_hex;
 
+var keep_malloc: *void = &malloc as *void;
 
 func _start() -> void {
     var raw: *u8 = malloc(8) as *u8;
@@ -133,7 +134,7 @@ def main():
         asm = os.path.join(tmp, "positive.s")
         obj = os.path.join(tmp, "positive.o")
         binary = os.path.join(tmp, "positive.bin")
-        compiled = run([CIDER, "compile", "--no-opt", positive, "-o", asm],
+        compiled = run([CIDER, "compile", positive, "-o", asm],
                        env=library_env())
         if compiled.returncode != 0:
             failures.append("owning String compile: " + describe(compiled))

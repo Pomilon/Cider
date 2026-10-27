@@ -2082,12 +2082,20 @@ std::string Resolver::linkName(const Decl& decl) const {
     if (decl.isExtern) {
         return decl.name;
     }
+    // A from-import alias reuses its target's id but is bound in the
+    // importing module. The first declaration with that id is the home
+    // definition, so recover it before deciding the link name.
+    const Decl* homeDecl = &decl;
+    if (const Decl* canonical = declById(decl.id)) {
+        homeDecl = canonical;
+    }
     // Decls bound in a function body have no link symbol; callers pass the
     // module they looked the name up in. A null scope is entry-adjacent by
     // construction, so bare is safe there too.
-    std::string home = decl.scope != nullptr ? decl.scope->module : entryModule();
+    std::string home =
+        homeDecl->scope != nullptr ? homeDecl->scope->module : entryModule();
     if (home.empty() || home == entryModule()) {
-        return decl.name;
+        return homeDecl->name;
     }
     // Dots cannot survive the assembler: `a.b`'s `aval` links as `a__b__aval`.
     std::string flat = home;
@@ -2096,7 +2104,7 @@ std::string Resolver::linkName(const Decl& decl) const {
             c = '_';
         }
     }
-    return flat + "__" + decl.name;
+    return flat + "__" + homeDecl->name;
 }
 
 std::string Resolver::specLinkName(DeclId spec) const {
