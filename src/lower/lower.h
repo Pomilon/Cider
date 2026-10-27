@@ -633,6 +633,12 @@ public:
     // the two cannot disagree about what `+` emits.
     ir::Value emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
                         Position pos);
+    // Assignment through a member operator[] that answers *T: the receiver
+    // and index are lowered exactly once, then the value is stored through
+    // the returned pointer. A compound form loads the pointee, applies the
+    // built-in compound operation, and stores once. Answers false (after a
+    // diagnostic) when the shapes disagree.
+    bool lowerOperatorIndexAssign(Assign& n, std::vector<ir::Value>& value);
     // Assignments evaluate the value (computing first for a compound form)
     // and store it into the place the target names.
     ir::Value lowerAssign(Assign& n);

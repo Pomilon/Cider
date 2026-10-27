@@ -181,6 +181,9 @@ public:
     bool isMemberOperator(const Binary* expr) const;
     bool isMemberOperator(const Unary* expr) const;
     bool isOperatorIndex(const Index* expr) const;
+    // Whether this assignment stores through a member operator[] result:
+    // the operator must answer *T, and the store goes through that pointer.
+    bool isOperatorIndexAssign(const Assign* expr) const;
     bool isOperatorCall(const Call* expr) const;
     bool isOperatorAssign(const Assign* expr) const;
     bool isOperatorArrow(const Field* expr) const;
@@ -502,6 +505,7 @@ private:
     std::unordered_set<const Binary*> memberOperatorCalls_;
     std::unordered_set<const Unary*> memberUnaryOperatorCalls_;
     std::unordered_set<const Index*> operatorIndexes_;
+    std::unordered_set<const Assign*> operatorIndexAssigns_;
     std::unordered_set<const Call*> operatorCalls_;
     std::unordered_set<const Assign*> operatorAssigns_;
     std::unordered_map<const Field*, TypeRef> operatorArrows_;

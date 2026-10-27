@@ -636,6 +636,84 @@ void testOperatorOverloads() {
           "try_new array allocation is rejected");
 }
 
+// Assignment through a member operator[] stores through its pointer result.
+// The index and value match exactly; a non-pointer result is never treated
+// as built-in indexing.
+void testOperatorIndexAssignment() {
+    std::printf("index operator assignment stores through its pointer\n");
+    const std::string vec =
+        "struct Vec { var data: [int; 4];\n"
+        "    func operator[](i: int) -> *int {\n"
+        "        return &(*self).data[i];\n"
+        "    }\n"
+        "}\n";
+    Checked good = check(
+        vec +
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    v[1] = 7;\n"
+        "    v[2] += 3;\n"
+        "    v[3] -= 1;\n"
+        "    return *v[1] + *v[2] + *v[3];\n"
+        "}\n");
+    check(good.ok, "assigning through an index operator checks: " + good.stage);
+
+    Checked valueMismatch = check(
+        vec +
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    var x: u8 = 7;\n"
+        "    v[1] = x;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!valueMismatch.ok && valueMismatch.stage == "check",
+          "an index operator store needs the exact pointee type");
+
+    Checked indexMismatch = check(
+        vec +
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    v[true] = 7;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!indexMismatch.ok && indexMismatch.stage == "check",
+          "an index operator store needs the exact index type");
+
+    Checked valueReturn = check(
+        "struct Vec { var data: [int; 4];\n"
+        "    func operator[](i: int) -> int { return (*self).data[i]; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    v[1] = 7;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!valueReturn.ok && valueReturn.stage == "check",
+          "assigning through a value-returning index operator is rejected");
+
+    Checked compoundMismatch = check(
+        vec +
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    v[1] += true;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!compoundMismatch.ok && compoundMismatch.stage == "check",
+          "an index operator compound assignment uses built-in types");
+
+    Checked voidPointee = check(
+        "struct V { var data: [int; 1];\n"
+        "    func operator[](i: int) -> *void { return &(*self).data[i] as *void; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: V = V { data: [0] };\n"
+        "    v[0] = 1;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!voidPointee.ok && voidPointee.stage == "check",
+          "an index operator store rejects a *void result");
+}
+
 void testInitAssign() {
     std::printf("init assigns every field\n");
     Checked gap = check(
@@ -2981,6 +3059,7 @@ int main() {
     testControl();
     testExceptionSyntaxRemoved();
     testOperatorOverloads();
+    testOperatorIndexAssignment();
     testArrowOperator();
     testForInProtocol();
     testInitAssign();

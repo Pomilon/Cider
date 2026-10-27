@@ -883,6 +883,40 @@ void testOperatorOverloadsNative() {
     check(!signaled && code == 3, "a struct compound assignment answers 3");
 }
 
+// Assignment through a pointer-returning operator[] calls the member once
+// and stores through its answer. A nil answer follows the normal null path.
+void testOperatorIndexAssignmentNative() {
+    std::printf("index operator assignment runs natively\n");
+    bool signaled = false;
+    int code = runCode(
+        "struct Vec { var data: [int; 4];\n"
+        "    func operator[](i: int) -> *int {\n"
+        "        return &(*self).data[i];\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    v[1] = 7;\n"
+        "    v[2] += 3;\n"
+        "    return *v[1] + *v[2];\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 10,
+          "a stored and compounded index operator answers 10");
+
+    expectDiagnosed(
+        "struct V { var x: int;\n"
+        "    func operator[](i: int) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: V = V { x: 0 };\n"
+        "    v[0] = 1;\n"
+        "    return 0;\n"
+        "}\n",
+        "vm error: null pointer dereference\n",
+        "a nil index operator store reports the null trap");
+}
+
 void testTrap() {
     std::printf("traps\n");
     bool signaled = false;
@@ -3382,6 +3416,7 @@ int main() {
     testAsm();
     testTrapMessages();
     testOperatorOverloadsNative();
+    testOperatorIndexAssignmentNative();
     testArrowOperatorNative();
     testTrap();
     testRemovedPrelude();

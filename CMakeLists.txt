@@ -451,6 +451,15 @@ add_test(NAME v4_strength
 set_tests_properties(v4_strength PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Assignment through a pointer-returning `operator[]`: the member is called
+# once and the value is stored through its answer, on native and both VM legs.
+# Exact value/index mismatches and a value-returning operator are rejected.
+add_test(NAME v4_operator_index_assign
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/operator_index_assign_test.py)
+set_tests_properties(v4_operator_index_assign PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its

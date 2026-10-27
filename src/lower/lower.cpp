@@ -12473,9 +12473,129 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     return undefined();
 }
 
+bool Lowerer::lowerOperatorIndexAssign(Assign& n,
+                                       std::vector<ir::Value>& value) {
+    const auto* index = dynamic_cast<const Index*>(n.target.get());
+    if (index == nullptr) {
+        refuse(n.pos, "this assignment");
+        return false;
+    }
+    // One call: the receiver and index are moved into the synthetic call
+    // and moved back, as a plain `a[i]` read does.
+    std::vector<ir::Value> ptr =
+        lowerOperatorCall(const_cast<Index&>(*index));
+    if (failed_) {
+        return false;
+    }
+    if (ptr.size() != kOneWord) {
+        refuse(n.pos, "this assignment");
+        return false;
+    }
+    TypeRef ptrType = checker_.typeOf(index);
+    if (ptrType.isError() || ptrType.type->kind() != Kind::Pointer ||
+        ptrType.type->pointee() == nullptr) {
+        refuse(index->pos, "assignment through operator '[]'");
+        return false;
+    }
+    TypeRef element{ptrType.type->pointee()};
+    TypeRef valueType = checker_.typeOf(n.value.get());
+    value = lowerWords(n.value.get());
+    value = adjustStringLitArg(n.value.get(), std::move(value), element);
+    value = boxClassOperand(n.value.get(), std::move(value), valueType,
+                            element, n.pos);
+    if (failed_) {
+        return false;
+    }
+    int count = wordCount(element);
+    if (count < 0 || value.size() != static_cast<size_t>(count)) {
+        refuse(n.pos, "this assignment");
+        return false;
+    }
+    // The operator's answer is the store address. No nil test is added:
+    // loadRange/storeRange run the same guard every other indirect access
+    // uses, so a nil answer traps rather than silently dropping the store.
+    Place place;
+    place.type = element;
+    place.off = 0;
+    place.isVolatile = false;
+    place.hasIndirect = true;
+    place.indirect = ptr[kFirstWord];
+    if (n.op.has_value()) {
+        std::vector<ir::Value> old = loadRange(n.pos, place, element);
+        if (failed_) {
+            return false;
+        }
+        if (old.size() != kOneWord || value.size() != kOneWord) {
+            refuse(n.pos, "a compound assignment needs one word");
+            return false;
+        }
+        if (element.type->kind() == Kind::Basic &&
+            basicIsFloat(*element.type->basic())) {
+            value[0] = widenFloat(value[0], valueType, element, n.pos);
+            if (failed_) {
+                return false;
+            }
+        }
+        if (element.type->kind() == Kind::Pointer &&
+            (*n.op == BinOp::Add || *n.op == BinOp::Sub)) {
+            // `p += n` through the returned pointer advances by the scaled
+            // count, following the built-in pointer compound rule.
+            TypeRef countType{ctx_.basic(BasicKind::I64)};
+            ir::Value step =
+                convertInt(value[0], valueType, countType, n.pos);
+            if (failed_) {
+                return false;
+            }
+            int64_t elemBytes = resolver_.nominalSize(element.type->pointee());
+            if (elemBytes <= 0) {
+                refuse(n.pos, "this pointer arithmetic");
+                return false;
+            }
+            if (elemBytes != 1) {
+                step = emitArith(BinOp::Mul, step,
+                                 constantI64(elemBytes, countType, n.pos),
+                                 countType, n.pos);
+                if (failed_) {
+                    return false;
+                }
+            }
+            ir::Instr move;
+            move.op = *n.op == BinOp::Add ? ir::Op::Add : ir::Op::Sub;
+            move.loc = n.pos;
+            move.type = element;
+            move.width = ir::IRType::Ptr;
+            move.isPure = true;
+            move.operands.push_back(old[0]);
+            move.operands.push_back(step);
+            ir::Value at = newValue(move.width, element, n.pos);
+            move.results.push_back(at);
+            emit(std::move(move));
+            value = {at};
+        } else {
+            value = {emitArith(*n.op, old[0], value[0], element, n.pos)};
+        }
+        if (failed_) {
+            return false;
+        }
+    }
+    storeRange(n.pos, place, value, element);
+    return !failed_;
+}
+
 ir::Value Lowerer::lowerAssign(Assign& n) {
     if (failed_) {
         return undefined();
+    }
+    if (checker_.isOperatorIndexAssign(&n)) {
+        std::vector<ir::Value> value;
+        if (!lowerOperatorIndexAssign(n, value)) {
+            return undefined();
+        }
+        if (value.size() != kOneWord) {
+            refuse(n.pos, "a multi-word assignment is not an expression");
+            return undefined();
+        }
+        return value[0];
     }
     if (checker_.isOperatorAssign(&n)) {
         // The member returns void, so a user-defined assignment is a
@@ -12564,6 +12684,11 @@ bool Lowerer::compoundValue(Assign& n, std::vector<ir::Value>& value) {
 // lowerAssign and refuses there.
 void Lowerer::lowerAssignStmt(Assign& n) {
     if (failed_) {
+        return;
+    }
+    if (checker_.isOperatorIndexAssign(&n)) {
+        std::vector<ir::Value> value;
+        (void)lowerOperatorIndexAssign(n, value);
         return;
     }
     if (checker_.isOperatorAssign(&n)) {

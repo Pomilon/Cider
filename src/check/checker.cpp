@@ -93,6 +93,10 @@ bool Checker::isOperatorIndex(const Index* expr) const {
     return operatorIndexes_.find(expr) != operatorIndexes_.end();
 }
 
+bool Checker::isOperatorIndexAssign(const Assign* expr) const {
+    return operatorIndexAssigns_.find(expr) != operatorIndexAssigns_.end();
+}
+
 bool Checker::isOperatorCall(const Call* expr) const {
     return operatorCalls_.find(expr) != operatorCalls_.end();
 }
@@ -2998,6 +3002,74 @@ void Checker::visitAssign(Assign& n) {
         if (!base.isError() && base.type->kind() == Kind::String) {
             fail(n.target->pos, "strings are immutable");
             record(&n, errorRef());
+            return;
+        }
+        if (isOperatorIndex(index)) {
+            // Assignment through a member operator[]: the operator is called
+            // once and must answer a pointer to the stored element. A
+            // non-pointer result is a check error, never a fallback to
+            // built-in indexing. The value matches the pointee exactly for
+            // `=`; a compound form uses the built-in compound rule on that
+            // pointee type. The store itself goes through the pointer, so a
+            // nil answer behaves like any other store through nil.
+            std::optional<DeclId> id = base.isError() ? std::nullopt : base.type->decl();
+            const Signature* sig =
+                id.has_value() ? resolver_.methodSig(*id, "operator_index") : nullptr;
+            const Type* ret = sig != nullptr ? sig->returnType() : nullptr;
+            if (ret == nullptr || ret->kind() != Kind::Pointer ||
+                ret->pointee() == nullptr) {
+                fail(n.target->pos,
+                     "assignment through operator '[]' needs a pointer result");
+                record(&n, errorRef());
+                return;
+            }
+            TypeRef element{ret->pointee()};
+            if (element.type->kind() == Kind::Void) {
+                fail(n.target->pos,
+                     "cannot assign through operator '[]' returning *void");
+                record(&n, errorRef());
+                return;
+            }
+            if (!n.op.has_value()) {
+                TypeRef value = checkExpr(n.value.get(), element);
+                if (value.isError()) {
+                    record(&n, errorRef());
+                    return;
+                }
+                if (value != element) {
+                    fail(n.value->pos,
+                         "assignment through operator '[]' needs " +
+                             typeName(element) + ", got " + typeName(value));
+                    record(&n, errorRef());
+                    return;
+                }
+                operatorIndexAssigns_.insert(&n);
+                record(&n, element);
+                return;
+            }
+            TypeRef value = checkExpr(n.value.get(), TypeRef{ctx_.wildcard()});
+            if (value.isError()) {
+                record(&n, errorRef());
+                return;
+            }
+            // The same built-in compound shapes the ordinary target rule
+            // accepts: pointer += integer scales, everything else combines
+            // to a common numeric type and converts back to the pointee.
+            if (element.type->kind() == Kind::Pointer &&
+                element.type->pointee() != ctx_.void_() && isInteger(value) &&
+                (n.op == BinOp::Add || n.op == BinOp::Sub)) {
+                operatorIndexAssigns_.insert(&n);
+                record(&n, element);
+                return;
+            }
+            TypeRef combined = commonType(element, value, n.pos);
+            if (combined.isError()) {
+                record(&n, errorRef());
+                return;
+            }
+            checkCompatible(n.value->pos, n.value.get(), combined, element);
+            operatorIndexAssigns_.insert(&n);
+            record(&n, element);
             return;
         }
     }

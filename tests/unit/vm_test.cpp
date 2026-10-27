@@ -1089,6 +1089,62 @@ void testArrowOperatorVm() {
     }
 }
 
+// Assignment through a pointer-returning operator[] runs on both legs. A
+// nil result is still a store through nil, so it reports the normal trap.
+void testOperatorIndexAssignmentVm() {
+    std::printf("index operator assignment runs\n");
+    Lowered p = lower(
+        "struct Vec { var data: [int; 4];\n"
+        "    func operator[](i: int) -> *int {\n"
+        "        return &(*self).data[i];\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    v[1] = 7;\n"
+        "    v[2] += 3;\n"
+        "    return *v[1] + *v[2];\n"
+        "}\n");
+    check(p.ok, "an index operator store program lowers: " + p.stage);
+    if (!p.ok) {
+        return;
+    }
+    cider::vm::VmResult unr = cider::vm::run(*p.module, "");
+    check(unr.ok && unr.exitCode == 10,
+          "the unoptimised index operator store answers 10: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*p.module);
+    check(ores.ok, "the index operator store program optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*p.module, "");
+    check(opr.ok && opr.exitCode == 10,
+          "the optimised index operator store answers 10: " + opr.error);
+
+    Lowered nil = lower(
+        "struct V { var x: int;\n"
+        "    func operator[](i: int) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: V = V { x: 0 };\n"
+        "    v[0] = 1;\n"
+        "    return 0;\n"
+        "}\n");
+    check(nil.ok, "a nil index operator store lowers: " + nil.stage);
+    if (!nil.ok) {
+        return;
+    }
+    cider::vm::VmResult nrun = cider::vm::run(*nil.module, "");
+    check(nrun.ok && nrun.exitCode == 2 &&
+              nrun.stderrText == "vm error: null pointer dereference\n",
+          "a nil index operator store reports the normal null trap");
+    cider::opt::OptResult nres = cider::opt::run(*nil.module);
+    check(nres.ok, "the nil index operator store optimises: " + nres.error);
+    cider::vm::VmResult nopt = cider::vm::run(*nil.module, "");
+    check(nopt.ok && nopt.exitCode == 2 &&
+              nopt.stderrText == "vm error: null pointer dereference\n",
+          "the optimised nil store keeps the null trap");
+}
+
+// Structs and unions have no destructor: delete is a nil test, then the
+// library operator. Classes keep running deinit before the same release.
 int main() {
     std::printf("vm_test — the interpreter answers\n\n");
     testExit();
@@ -1110,6 +1166,7 @@ int main() {
     testNilFnptrCall();
     testFieldDefaults();
     testOperatorOverloadsVm();
+    testOperatorIndexAssignmentVm();
     testArrowOperatorVm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

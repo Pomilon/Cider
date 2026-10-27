@@ -1608,6 +1608,100 @@ void testOperators() {
     check(compoundCall, "a += b lowers to the compound assignment operator");
 }
 
+// Assignment through operator[] calls the operator once, then stores through
+// the pointer it answered. The compound form loads the pointee, combines and
+// stores once.
+void testOperatorIndexAssignment() {
+    std::printf("index operator assignment stores through the pointer\n");
+    const std::string vec =
+        "struct Vec { var data: [int; 4];\n"
+        "    func operator[](i: int) -> *int {\n"
+        "        return &(*self).data[i];\n"
+        "    }\n"
+        "}\n";
+    Lowered assign = lower(
+        vec +
+        "func put(v: Vec) -> void { v[1] = 7; }\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    put(v);\n"
+        "    return 0;\n"
+        "}\n");
+    check(assign.ok, "an index operator store lowers: " + assign.stage);
+    if (!assign.ok) {
+        return;
+    }
+    const cider::ir::Function* put = find(assign.module.get(), "put");
+    check(put != nullptr && countOp(*put, cider::ir::Op::Call) == 1,
+          "the store calls the index operator exactly once");
+    check(put != nullptr && countOp(*put, cider::ir::Op::Store) >= 1,
+          "the store writes through the returned pointer");
+
+    Lowered compound = lower(
+        vec +
+        "func bump(v: Vec) -> void { v[2] += 5; }\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { data: [0, ...] };\n"
+        "    bump(v);\n"
+        "    return 0;\n"
+        "}\n");
+    check(compound.ok, "an index operator compound store lowers: " + compound.stage);
+    if (!compound.ok) {
+        return;
+    }
+    const cider::ir::Function* bump = find(compound.module.get(), "bump");
+    check(bump != nullptr && countOp(*bump, cider::ir::Op::Call) == 1,
+          "the compound store calls the index operator exactly once");
+    check(bump != nullptr && countOp(*bump, cider::ir::Op::Load) >= 1 &&
+              countOp(*bump, cider::ir::Op::Add) == 1 &&
+              countOp(*bump, cider::ir::Op::Store) >= 1,
+          "the compound store loads, adds and stores once");
+
+    Lowered nil = lower(
+        "struct V { var x: int;\n"
+        "    func operator[](i: int) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func put(v: V) -> void { v[0] = 1; }\n"
+        "func main() -> int {\n"
+        "    var v: V = V { x: 0 };\n"
+        "    put(v);\n"
+        "    return 0;\n"
+        "}\n");
+    check(nil.ok, "a nil index operator result lowers: " + nil.stage);
+    if (nil.ok) {
+        const cider::ir::Function* nilPut = find(nil.module.get(), "put");
+        bool callSeen = false;
+        bool storeGuard = false;
+        if (nilPut != nullptr) {
+            for (const cider::ir::Block& block : nilPut->blocks) {
+                for (const cider::ir::Instr& instr : block.body) {
+                    if (instr.op == cider::ir::Op::Call &&
+                        instr.callee == "V__operator_index") {
+                        callSeen = true;
+                    }
+                }
+                if (callSeen && block.term.term == cider::ir::Term::Trap) {
+                    storeGuard = true;
+                }
+            }
+        }
+        check(callSeen && storeGuard,
+              "the store through a nil result keeps the null trap");
+    }
+
+    Lowered bad = lower(
+        "struct V { var data: [int; 1];\n"
+        "    func operator[](i: int) -> int { return (*self).data[i]; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: V = V { data: [0] };\n"
+        "    v[0] = 1;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!bad.ok && bad.stage == "check",
+          "a value-returning index operator cannot be assigned through");
+}
+
 void testMultiWordReturn() {
     std::printf("multi-word returns fill Ret words\n");
     Lowered r = lower(
@@ -1886,6 +1980,7 @@ int main() {
     testSsa();
     testCalls();
     testOperators();
+    testOperatorIndexAssignment();
     testArrowOperator();
     testLoop();
     testBareReturn();
