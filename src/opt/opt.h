@@ -57,6 +57,13 @@ struct OptResult {
     uint64_t expressionsRemoved = 0;
     uint64_t usesRedirected = 0;
     uint64_t copiesCollapsed = 0;
+    // Loop-invariant code motion counters. `licmLoops` counts natural loops
+    // detected, `licmHoisted` counts instruction moves (a nested invariant
+    // moved out of two loops counts twice), and `licmSkipped` counts loops
+    // left alone because they have no existing preheader.
+    uint64_t licmLoops = 0;
+    uint64_t licmHoisted = 0;
+    uint64_t licmSkipped = 0;
 };
 
 // What one inlining run did. Kept separate from OptResult so the pass is
@@ -90,6 +97,15 @@ struct GvnResult {
     uint64_t copiesCollapsed = 0;
 };
 
+// What one loop-invariant code motion run did. `loops` counts natural loops
+// detected (one per header), `hoisted` counts instruction moves, and `skipped`
+// counts loops with no existing preheader.
+struct LicmResult {
+    uint64_t loops = 0;
+    uint64_t hoisted = 0;
+    uint64_t skipped = 0;
+};
+
 // What phi lowering did for codegen.
 struct PhiLowerResult {
     bool ok = false;
@@ -100,11 +116,12 @@ struct PhiLowerResult {
 };
 
 // Structural check, then inlining, then a second structural check, then
-// mem2reg, fold, dominance-scoped value numbering, slot forwarding, and
-// dead-code elimination. Inlining first gives mem2reg the cloned parameter
-// slots to promote; the second check refuses a malformed clone instead of
-// letting a later pass read it; the third check after value numbering catches
-// a malformed use rewrite before any later pass or codegen sees it.
+// mem2reg, fold, dominance-scoped value numbering, loop-invariant code motion,
+// slot forwarding, and dead-code elimination. Inlining first gives mem2reg the
+// cloned parameter slots to promote; the second check refuses a malformed
+// clone instead of letting a later pass read it; the third check after value
+// numbering catches a malformed use rewrite, and the fourth after LICM catches
+// a malformed move, before any later pass or codegen sees it.
 OptResult run(ir::Module& module);
 
 // Clone small direct, same-module callees at their call sites, one level per
@@ -159,6 +176,19 @@ MemoryResult forwardMemory(ir::Module& module);
 // ordered by value id. Every use of a duplicate is redirected to its leader,
 // and Copy chains collapse when the copied value has the same width and type.
 GvnResult valueNumber(ir::Module& module);
+
+// Loop-invariant code motion over the phi IR. A natural loop is a back edge
+// `latch -> header` where the header dominates the latch. A loop is rewritten
+// only when it already has a preheader: exactly one predecessor outside the
+// loop whose only successor is the header. Pure, non-volatile, non-trapping
+// instructions with one non-float result and the GVN allowlist move to the end
+// of that preheader when every operand is outside the loop or was hoisted
+// earlier. Loops are processed innermost first, so an invariant can leave both
+// an inner and an outer loop. Speculation is allowed because an allowed
+// instruction cannot fault or observe memory; traps, loads, stores, calls,
+// asm, phis, casts and float operations never move. No block is created,
+// split, reordered or relabelled.
+LicmResult loopInvariantCodeMotion(ir::Module& module);
 
 // Dead-code elimination. Deletes a definition only when every result is
 // unused, the instruction is pure, it cannot trap, and it is not volatile.
