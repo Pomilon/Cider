@@ -168,8 +168,8 @@ add_test(NAME lowering COMMAND lower_test)
 
 add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/memory.cpp src/opt/mem2reg.cpp
-                               src/opt/inline.cpp src/opt/philower.cpp
-                               src/opt/opt.cpp)
+                               src/opt/inline.cpp src/opt/gvn.cpp
+                               src/opt/philower.cpp src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 
@@ -182,6 +182,11 @@ add_executable(inline_test tests/unit/inline_test.cpp)
 target_link_libraries(inline_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(inline_test PRIVATE src)
 add_test(NAME inline COMMAND inline_test)
+
+add_executable(gvn_test tests/unit/gvn_test.cpp)
+target_link_libraries(gvn_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(gvn_test PRIVATE src)
+add_test(NAME gvn COMMAND gvn_test)
 
 # --- The interpreter -----------------------------------------------------------
 #
@@ -349,6 +354,15 @@ add_test(NAME v4_inlining
 set_tests_properties(v4_inlining PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Task 4's dominance-scoped value-numbering slice: duplicate pure arithmetic
+# disappears across a join and inside a loop, sibling branches keep their own
+# expressions, and both VM legs agree with native. Two compiles pin stability.
+add_test(NAME v4_gvn
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/gvn_test.py)
+set_tests_properties(v4_gvn PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its
@@ -373,7 +387,7 @@ add_test(NAME target COMMAND target_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline codegen regalloc vm driver target
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline gvn codegen regalloc vm driver target
              PROPERTIES LABELS "gate")
 
 # --- Opt-in UEFI smoke ---------------------------------------------------------

@@ -1,13 +1,16 @@
-// opt.cpp — inline, mem2reg, fold, forward slots, then dead-code elimination.
+// opt.cpp — inline, mem2reg, fold, value-number, forward slots, then dead-code
+// elimination.
 //
 // Inlining first clones small direct callees and gives their parameter words
 // fresh slots, so mem2reg can promote the cloned traffic. Mem2reg then turns
 // straight-line and phi-joined slot traffic into SSA, so folding sees more
-// constants; forwarding still covers every slot mem2reg left in memory; DCE
-// last deletes the values every pass orphaned. The structural check runs
-// before any pass and again after inlining, so no pass reads garbage and a
-// malformed clone fails cleanly. Each pass preserves the seven rows of IR.md
-// §7, and each row below says how.
+// constants. Value numbering runs on the phi IR after folding and before slot
+// forwarding: it removes duplicate pure expressions across dominated blocks,
+// while forwarding and DCE still see the final value graph. DCE last deletes
+// the values every pass orphaned. The structural check runs before any pass,
+// again after inlining, and again after value numbering, so no pass reads
+// garbage and a malformed rewrite fails cleanly. Each pass preserves the seven
+// rows of IR.md §7, and each row below says how.
 
 #include "opt/opt.h"
 
@@ -495,6 +498,18 @@ OptResult run(ir::Module& module) {
     result.loadsPromoted = promotion.loadsReplaced;
     result.storesPromoted = promotion.storesRemoved;
     result.folded = foldConsts(module);
+    GvnResult gvn = valueNumber(module);
+    result.expressionsRemoved = gvn.expressionsRemoved;
+    result.usesRedirected = gvn.usesRedirected;
+    result.copiesCollapsed = gvn.copiesCollapsed;
+    bad = checkModule(module);
+    if (!bad.empty()) {
+        const StructuralError& first = bad[0];
+        result.ok = false;
+        result.error = "after gvn " + first.function + ":" +
+                       std::to_string(first.block) + ": " + first.message;
+        return result;
+    }
     MemoryResult memory = forwardMemory(module);
     result.forwarded = memory.forwarded;
     result.storesRemoved = memory.storesRemoved;

@@ -49,6 +49,14 @@ struct OptResult {
     uint64_t inlined = 0;
     uint64_t clonedInstructions = 0;
     uint64_t inliningSkipped = 0;
+    // Value-numbering counters. `expressionsRemoved` counts every duplicate
+    // pure instruction deleted, including collapsed Copy moves;
+    // `copiesCollapsed` names the Copy subset. `usesRedirected` counts every
+    // operand, call word, phi incoming value, address base, stored value,
+    // indirect callee and terminator value rewritten to a dominating leader.
+    uint64_t expressionsRemoved = 0;
+    uint64_t usesRedirected = 0;
+    uint64_t copiesCollapsed = 0;
 };
 
 // What one inlining run did. Kept separate from OptResult so the pass is
@@ -74,6 +82,14 @@ struct PromotionResult {
     uint64_t storesRemoved = 0;
 };
 
+// What one value-numbering run did. Kept separate from OptResult so the pass
+// is testable without the rest of the pipeline.
+struct GvnResult {
+    uint64_t expressionsRemoved = 0;
+    uint64_t usesRedirected = 0;
+    uint64_t copiesCollapsed = 0;
+};
+
 // What phi lowering did for codegen.
 struct PhiLowerResult {
     bool ok = false;
@@ -84,9 +100,11 @@ struct PhiLowerResult {
 };
 
 // Structural check, then inlining, then a second structural check, then
-// mem2reg, fold, slot forwarding, and dead-code elimination. Inlining first
-// gives mem2reg the cloned parameter slots to promote; the second check
-// refuses a malformed clone instead of letting a later pass read it.
+// mem2reg, fold, dominance-scoped value numbering, slot forwarding, and
+// dead-code elimination. Inlining first gives mem2reg the cloned parameter
+// slots to promote; the second check refuses a malformed clone instead of
+// letting a later pass read it; the third check after value numbering catches
+// a malformed use rewrite before any later pass or codegen sees it.
 OptResult run(ir::Module& module);
 
 // Clone small direct, same-module callees at their call sites, one level per
@@ -130,6 +148,17 @@ uint64_t foldConsts(ir::Module& module);
 // displacement. Volatile accesses and calls are barriers, and a function with
 // asm is left alone. When in doubt, it does nothing.
 MemoryResult forwardMemory(ir::Module& module);
+
+// Dominance-scoped global value numbering. An expression is available in a
+// block only when its leader dominates that block, so sibling branches never
+// share one and a join sees only what every path computed. Commoned ops are
+// the explicit pure, non-trapping allowlist in gvn.cpp: scalar integer and
+// pointer arithmetic/bitwise/shift, Neg/Not/BitNot, Cmp, Const, Copy and Gep.
+// Floats, loads, stores, calls, phis, extract/insert, casts, asm, trapping
+// ops and volatile accesses are never commoned. Commutative operands are
+// ordered by value id. Every use of a duplicate is redirected to its leader,
+// and Copy chains collapse when the copied value has the same width and type.
+GvnResult valueNumber(ir::Module& module);
 
 // Dead-code elimination. Deletes a definition only when every result is
 // unused, the instruction is pure, it cannot trap, and it is not volatile.
