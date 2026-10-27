@@ -2,9 +2,11 @@
 //
 // Intel syntax with `.intel_syntax noprefix`, so plain `cc file.s` assembles
 // it. Every value keeps its own stack slot and fixed scratch registers carry
-// values between slot and operation. A block-local linear scan (regalloc.cpp)
-// homes eligible caller-saved values inside one block; everything else uses
-// the slot path unchanged.
+// values between slot and operation. A global live-range scan (regalloc.cpp)
+// homes eligible values across blocks, the original block-local scan homes
+// values wholly inside one block, and everything else uses the slot path
+// unchanged. rbx is the one callee-saved home; the prologue saves it in a
+// frame cell and every return restores it.
 //
 // The text is a pure function of the module: no timestamps, no working
 // directories, no absolute paths. Gate L5.
@@ -452,8 +454,8 @@ private:
     // to 64 bits on store (sign or zero per the type), and every load reads
     // exactly the bytes its type names — so a narrow field never reads
     // neighbor bytes, which is the defect v2's spill slots had. This remains
-    // the fallback for every value the local allocator does not home in a
-    // register, and the frame still reserves a cell for every id.
+    // the fallback for every value the allocator does not home in a register,
+    // and the frame still reserves a cell for every id.
     std::string slot(uint32_t id) const {
         return "[rsp + " + std::to_string(id * 8) + "]";
     }
@@ -642,6 +644,14 @@ private:
             stages = (stages + 1) & ~static_cast<uint64_t>(1);
             cells += static_cast<uint32_t>(stages);
         }
+        // The allocation decides whether a callee-saved register is used, so
+        // it runs before the frame size is fixed. Its save cells sit past the
+        // value slots and call stage, and the frame rounds over them: every
+        // entry-alignment rule below only sees a span that is still a
+        // 16-multiple (plus the native _start word).
+        allocation_ = allocateFunction(fn);
+        calleeSaveBase_ = cells;
+        cells += static_cast<uint32_t>(allocation_.calleeSaved.size());
         uint32_t span = (cells * 8 + 15) & ~15u;
         // A normal SysV callee enters with rsp 8 mod 16 (the caller aligned
         // rsp before its call), so push rbp makes rbp 16-aligned and a
@@ -665,6 +675,16 @@ private:
         out_ += "  push rbp\n";
         out_ += "  mov rbp, rsp\n";
         out_ += "  sub rsp, " + std::to_string(span) + "\n";
+        // Callee-saved homes keep their caller's values in frame cells, so the
+        // prologue/epilogue pair never moves rsp and the span above already
+        // carries their bytes. rbx is the only pool member today.
+        uint32_t saveSlot = calleeSaveBase_;
+        for (Register reg : allocation_.calleeSaved) {
+            out_ += "  mov qword ptr [rsp + " +
+                    std::to_string(saveSlot * 8) + "], " +
+                    registerName(reg) + "\n";
+            ++saveSlot;
+        }
 
         // Parameters arrive in registers (then stack); they live in slots
         // from here on, like every other value. A float parameter comes in
@@ -735,10 +755,10 @@ private:
                 }
             }
         }
-        // A block-local linear scan. The allocation is an analysis only: the
-        // frame and every slot are still present, and a value without a home
-        // uses exactly the old stack path.
-        allocation_ = allocateFunction(fn);
+        // The allocation already ran: it decided the frame's callee-save
+        // cells above. It is an analysis only: the frame and every slot are
+        // still present, and a value without a home uses exactly the old
+        // stack path.
         for (uint32_t b = 0; b < fn.blocks.size(); ++b) {
             const ir::Block& block = fn.blocks[b];
             currentHome_ = b < allocation_.blocks.size()
@@ -1865,6 +1885,16 @@ private:
                     return false;
                 }
             }
+            // The return words are in rax/rdx/xmm0; restoring the
+            // callee-saved homes now cannot disturb them. The frame cells use
+            // rsp, so they are read before `leave` moves it.
+            uint32_t saveSlot = calleeSaveBase_;
+            for (Register reg : allocation_.calleeSaved) {
+                out_ += "  mov " + regRef(static_cast<uint8_t>(reg)) +
+                        ", qword ptr [rsp + " +
+                        std::to_string(saveSlot * 8) + "]\n";
+                ++saveSlot;
+            }
             out_ += "  leave\n";
             out_ += "  ret\n";
             return true;
@@ -1912,10 +1942,12 @@ private:
     // paired with that word prints `[rip + label]` (the global's value)
     // instead of the temporary holding the address.
     std::unordered_map<uint32_t, std::string> addrWords_;
-    // One local allocation per function, and the block whose homes the
-    // current instruction is emitted under.
+    // One function-wide allocation per function, and the block whose homes
+    // the current instruction is emitted under. Callee-saved homes are stored
+    // in frame cells starting at calleeSaveBase_.
     FunctionAllocation allocation_;
     const BlockAllocation* currentHome_ = nullptr;
+    uint32_t calleeSaveBase_ = 0;
     std::string out_;
     // Unique suffix for u64-to-float conversion labels (int→float casts
     // need a two-path sequence; see emitCast).

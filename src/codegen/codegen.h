@@ -10,10 +10,12 @@
 // refused with a diagnostic naming it, never silently approximated.
 //
 // Every value still has its own stack slot, and the fixed scratch registers
-// carry it between slot and operation. A block-local linear scan may home an
-// eligible single-word value in a caller-saved register for its local live
-// range; the slot remains the complete fallback. Nothing downstream may
-// depend on which slot a value got or whether it was homed.
+// carry it between slot and operation. A function-wide live-range scan may
+// home an eligible value in a caller-saved register across blocks, or in the
+// callee-saved rbx when a barrier forbids a caller-saved home; a block-local
+// scan keeps the old homes for values wholly inside one block. The slot
+// remains the complete fallback. Nothing downstream may depend on which slot
+// a value got or whether it was homed.
 
 #ifndef CIDER_CODEGEN_CODEGEN_H
 #define CIDER_CODEGEN_CODEGEN_H
