@@ -70,6 +70,21 @@ const cider::ir::Block* blockAt(const cider::ir::Function& fn, uint32_t label) {
     return nullptr;
 }
 
+constexpr uint32_t kNoBlock = 0xFFFFFFFFu;
+
+uint32_t blockOfValue(const cider::ir::Function& fn, uint32_t id) {
+    for (const cider::ir::Block& block : fn.blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            for (const cider::ir::Value& result : instr.results) {
+                if (result.id == id) {
+                    return block.label;
+                }
+            }
+        }
+    }
+    return kNoBlock;
+}
+
 const cider::ir::Instr* instrIn(const cider::ir::Function& fn, uint32_t label,
                                 cider::ir::Op op) {
     const cider::ir::Block* block = blockAt(fn, label);
@@ -983,10 +998,14 @@ void testPipelineWiring() {
     check(result.licmLoops == 1, "the LICM loop counter reaches OptResult");
     check(result.licmHoisted == 1, "the LICM hoist counter reaches OptResult");
     check(result.licmSkipped == 0, "the LICM skip counter reaches OptResult");
-    check(instrIn(*ir.fn, 0, cider::ir::Op::Add) != nullptr,
+    // Block cleanup may merge the preheader's successor into another block,
+    // so follow the value ids rather than a label whose number the CFG
+    // cleanup is allowed to remove.
+    check(blockOfValue(*ir.fn, 8) == 0,
           "the invariant add now sits in the entry");
-    check(countOpInBlock(*ir.fn, 2, cider::ir::Op::Add) == 0,
-          "the loop body no longer computes it");
+    check(blockOfValue(*ir.fn, 6) != 0 &&
+              blockOfValue(*ir.fn, 6) != kNoBlock,
+          "the loop-carried add stays out of the entry");
     check(structurallyValid(ir.module), "the pipeline output is valid");
 }
 

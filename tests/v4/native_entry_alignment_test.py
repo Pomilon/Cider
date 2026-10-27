@@ -59,7 +59,10 @@ POMEOS_ARGS = """func _start(argc: int, argv: **char) -> void {
 
 # The same entry carries a cross-block value live across a call, which the
 # global allocator homes in rbx. Saving rbx adds a frame cell; the native
-# _start frame must still be 8 mod 16 so its first call is aligned.
+# _start frame must still be 8 mod 16 so its first call is aligned. The
+# loop keeps `a` defined in one block and used in another on every iteration;
+# a straight-line if/else would collapse to one block after CFG cleanup and
+# no longer exercise a cross-block live range.
 NATIVE_RBX = """func probe() -> int {
     var r: int = 0;
     asm { "mov {r:q}, rbp" }
@@ -77,12 +80,13 @@ func finish(code: int) -> void {
 func _start() -> void {
     var a: int = 7;
     var r: int = 0;
-    if (a > 0) {
+    var i: int = 0;
+    while (i < 1) {
         r = probe();
-    } else {
-        r = 2;
+        r = r + a;
+        i = i + 1;
     }
-    finish((r + a) & 15);
+    finish(r & 15);
 }
 """
 

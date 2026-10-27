@@ -73,6 +73,11 @@ struct OptResult {
     uint64_t blocksRemoved = 0;
     uint64_t phisSimplified = 0;
     uint64_t phiIncomingRemoved = 0;
+    // CFG block cleanup counters. `emptyBlocksRemoved` counts `Br target`
+    // blocks with no body; `blocksMerged` counts single-predecessor blocks
+    // folded into their unconditional predecessor.
+    uint64_t emptyBlocksRemoved = 0;
+    uint64_t blocksMerged = 0;
     // Exact-byte rodata deduplication. `rodataMerged` counts duplicate blobs
     // removed; `rodataBytesMerged` counts their bytes, including terminators.
     uint64_t rodataMerged = 0;
@@ -126,6 +131,13 @@ struct SimplifyResult {
     uint64_t blocksRemoved = 0;
     uint64_t phisSimplified = 0;
     uint64_t phiIncomingRemoved = 0;
+};
+
+// What one CFG block cleanup run did. Kept separate from OptResult so the pass
+// is testable without the rest of the pipeline.
+struct BlocksResult {
+    uint64_t emptyBlocksRemoved = 0;
+    uint64_t blocksMerged = 0;
 };
 
 // What one exact-byte rodata deduplication run did. `asmPinned` counts blobs
@@ -185,13 +197,14 @@ struct PhiLowerResult {
 };
 
 // Structural check, then inlining, then a second structural check, then
-// mem2reg, fold, control-flow simplification, dominance-scoped value
-// numbering, loop-invariant code motion, slot forwarding, and dead-code
-// elimination. Inlining first gives mem2reg the cloned parameter slots to
-// promote; the second check refuses a malformed clone instead of letting a
-// later pass read it; the third check after simplification and the fourth
-// after value numbering catch a malformed rewrite, and the fifth after LICM
-// catches a malformed move, before any later pass or codegen sees it.
+// mem2reg, fold, control-flow simplification, CFG block cleanup,
+// dominance-scoped value numbering, loop-invariant code motion, slot
+// forwarding, and dead-code elimination. Inlining first gives mem2reg the
+// cloned parameter slots to promote; the second check refuses a malformed
+// clone instead of letting a later pass read it; the third check after
+// simplification, the fourth after block cleanup, the fifth after value
+// numbering and the sixth after LICM catch a malformed rewrite before any
+// later pass or codegen sees it.
 OptResult run(ir::Module& module);
 
 // Clone small direct, same-module callees at their call sites, one level per
@@ -237,6 +250,20 @@ uint64_t foldConsts(ir::Module& module);
 // never deleted or moved, and block order is preserved. Runs after foldConsts
 // and before valueNumber; the pipeline checks the result structurally.
 SimplifyResult simplifyControlFlow(ir::Module& module);
+
+// Conservative CFG block cleanup. An empty non-entry block whose terminator is
+// `Br target` is removed and every predecessor edge is redirected to target;
+// when target has phis this is only done for a single predecessor that target
+// does not already name, and its phi incoming is relabelled. A non-entry block
+// with exactly one predecessor P, where P ends in `Br block`, is merged into P
+// when it has no phis; its body and terminator move to P and successor phi
+// incomings are relabelled from the block to P. Neither rule touches the entry
+// block, creates a self-loop, or duplicates a phi incoming. Blocks containing
+// asm, a trap or a volatile access are never merged. A function whose assembly
+// names its block-label prefix is left untouched, so assembly label references
+// stay resolvable. Runs after simplifyControlFlow and before valueNumber; the
+// pipeline checks the result structurally.
+BlocksResult cleanupBlocks(ir::Module& module);
 
 // Conservative load/store forwarding for non-escaping Alloca slots. After
 // mem2reg this is the fallback for slots that stay in memory: no phi nodes and

@@ -170,6 +170,7 @@ add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/memory.cpp src/opt/mem2reg.cpp
                                src/opt/inline.cpp src/opt/gvn.cpp
                                src/opt/licm.cpp src/opt/simplify.cpp
+                               src/opt/blocks.cpp
                                src/opt/philower.cpp src/opt/dce.cpp
                                src/opt/dedup.cpp src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
@@ -199,6 +200,11 @@ add_executable(simplify_test tests/unit/simplify_test.cpp)
 target_link_libraries(simplify_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(simplify_test PRIVATE src)
 add_test(NAME simplify COMMAND simplify_test)
+
+add_executable(blocks_test tests/unit/blocks_test.cpp)
+target_link_libraries(blocks_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(blocks_test PRIVATE src)
+add_test(NAME blocks COMMAND blocks_test)
 
 add_executable(dce_test tests/unit/dce_test.cpp)
 target_link_libraries(dce_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
@@ -421,6 +427,15 @@ add_test(NAME v4_simplify
 set_tests_properties(v4_simplify PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Empty-block elimination and single-predecessor merging: nested if/else and
+# loop shapes lose blocks in optimized IR and assembly, native plus both VM
+# legs agree, and two optimized compiles are byte-identical.
+add_test(NAME v4_blocks
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/blocks_test.py)
+set_tests_properties(v4_blocks PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its
@@ -445,7 +460,7 @@ add_test(NAME target COMMAND target_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline gvn licm simplify codegen regalloc vm driver target
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline gvn licm simplify blocks codegen regalloc vm driver target
              PROPERTIES LABELS "gate")
 
 # --- Opt-in UEFI smoke ---------------------------------------------------------
