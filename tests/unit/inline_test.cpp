@@ -586,6 +586,71 @@ void testOversizedSkipped() {
     }
 }
 
+void testCostModel() {
+    std::printf("the cost model limits duplicated medium callees\n");
+    auto build = [](uint32_t bodyInstrs, uint32_t sites) {
+        auto m = std::make_unique<SimpleModule>();
+        cider::ir::Function& callee = *m->callee;
+        callee.blocks.clear();
+        callee.params.clear();
+        cider::TypeRef word = m->b.i32();
+        m->b.addBlock(callee, 0);
+        for (uint32_t i = 0; i < bodyInstrs; ++i) {
+            m->b.emit(callee, m->b.constant(i, static_cast<int64_t>(i),
+                                          cider::ir::IRType::I32, word));
+        }
+        m->b.ret(callee, 0,
+                 {m->b.value(bodyInstrs - 1, cider::ir::IRType::I32, word)});
+
+        cider::ir::Function& caller = *m->caller;
+        caller.blocks.clear();
+        caller.params.clear();
+        m->b.addBlock(caller, 0);
+        for (uint32_t i = 0; i < sites; ++i) {
+            m->b.emit(caller,
+                      m->b.call("g", {},
+                                {m->b.value(1000 + i, cider::ir::IRType::I32,
+                                            word)}));
+        }
+        m->b.ret(caller, 0,
+                 {m->b.value(1000, cider::ir::IRType::I32, word)});
+        return m;
+    };
+
+    {
+        auto m = build(12, 5);
+        check(valid(m->b.module), "the five-site module is well formed");
+        cider::opt::InlineResult r = cider::opt::inlineCalls(m->b.module);
+        check(r.inlined == 0, "a medium callee at five sites is not inlined");
+        check(r.skipped == 5, "all five sites are skipped");
+        check(countOp(*m->caller, cider::ir::Op::Call) == 5,
+              "the five calls remain");
+    }
+    {
+        auto m = build(12, 4);
+        check(valid(m->b.module), "the four-site module is well formed");
+        cider::opt::InlineResult r = cider::opt::inlineCalls(m->b.module);
+        check(r.inlined == 4, "a medium callee at four sites is inlined");
+        check(r.skipped == 0, "no site is skipped at four sites");
+        check(countOp(*m->caller, cider::ir::Op::Call) == 0,
+              "the four calls are gone");
+    }
+    {
+        auto m = build(5, 8);
+        check(valid(m->b.module), "the tiny-callee module is well formed");
+        cider::opt::InlineResult r = cider::opt::inlineCalls(m->b.module);
+        check(r.inlined == 8, "a tiny callee is inlined at every site");
+        check(r.skipped == 0, "no tiny site is skipped");
+    }
+    {
+        auto m = build(25, 1);
+        check(valid(m->b.module), "the over-cap module is well formed");
+        cider::opt::InlineResult r = cider::opt::inlineCalls(m->b.module);
+        check(r.inlined == 0, "a callee over 24 instructions is not inlined");
+        check(r.skipped == 1, "the over-cap site is skipped");
+    }
+}
+
 void testMismatchLeavesIrValid() {
     std::printf("return-shape and no-Ret refusals leave the IR untouched\n");
     {
@@ -723,6 +788,7 @@ int main() {
     testMissingSkipped();
     testAsmSkipped();
     testOversizedSkipped();
+    testCostModel();
     testMismatchLeavesIrValid();
     testCountersAndDeterminism();
     std::printf("\n%d checks, %d failures\n", checks, failures);

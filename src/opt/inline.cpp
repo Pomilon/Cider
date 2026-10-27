@@ -15,7 +15,10 @@
 //     inlining can never unfold recursion;
 //   - a callee containing asm stays a call: asm can name frame storage the
 //     IR does not describe;
-//   - a callee over 80 instructions or 16 blocks stays a call;
+//   - a callee over 24 instructions or 16 blocks stays a call;
+//   - beyond the tiny tier, a callee with more than four call sites stays a
+//     call: cloning a medium body into many callers grows the image faster
+//     than removing the call overhead saves;
 //   - caller and callee must agree on the calling convention;
 //   - all reachable callee blocks are cloned. A callee with unreachable
 //     blocks is refused: cloning into an unreachable caller region would
@@ -50,8 +53,14 @@ namespace {
 constexpr uint32_t kInvalidValue = 0xFFFFFFFFu;
 constexpr uint32_t kLastFreshId = 0xFFFFFFFEu;
 constexpr uint64_t kOneResult = 1;
-constexpr uint64_t kMaxCalleeInstrs = 80;
+constexpr uint64_t kMaxCalleeInstrs = 24;
 constexpr uint64_t kMaxCalleeBlocks = 16;
+// A tiny helper is cheap enough to duplicate at every call. A larger body is
+// only inline-worthy while it is not spread across the module: cloning a
+// twenty-instruction function into many callers grows the image faster than
+// it removes call overhead.
+constexpr uint64_t kTinyCalleeInstrs = 8;
+constexpr uint64_t kMaxCalleeSites = 4;
 constexpr uint64_t kMaxSitesPerFunction = 40;
 constexpr uint64_t kMaxClonedInstrsPerFunction = 4000;
 
@@ -633,6 +642,7 @@ Plan planInline(const ir::Function& callee, const ir::Instr& call,
 // A call is eligible only when every refusal above says yes. This is a pure
 // predicate; the counters are updated by the caller.
 bool eligibleCall(const std::vector<ir::Function>& callees,
+                  const std::unordered_map<std::string, uint64_t>& callSites,
                   const ir::Function& caller, const ir::Instr& call,
                   const ir::Function*& callee) {
     callee = nullptr;
@@ -647,9 +657,16 @@ bool eligibleCall(const std::vector<ir::Function>& callees,
     if (hasAsm(*callee) || callsItself(*callee)) {
         return false;
     }
+    const uint64_t size = instructionCount(*callee);
     if (callee->blocks.size() > kMaxCalleeBlocks ||
-        instructionCount(*callee) > kMaxCalleeInstrs) {
+        size > kMaxCalleeInstrs) {
         return false;
+    }
+    if (size > kTinyCalleeInstrs) {
+        auto found = callSites.find(callee->name);
+        if (found != callSites.end() && found->second > kMaxCalleeSites) {
+            return false;
+        }
     }
     if (callee->signature.abi() != caller.signature.abi() ||
         call.call.msabi != (callee->signature.abi() == Abi::MsAbi)) {
@@ -676,6 +693,17 @@ InlineResult inlineCalls(ir::Module& module) {
     // turning a chain of small calls into nested copies and doubling large
     // programs. One level per call site means one original body per site.
     const std::vector<ir::Function> callees = module.functions;
+    std::unordered_map<std::string, uint64_t> callSites;
+    for (const ir::Function& fn : callees) {
+        for (const ir::Block& block : fn.blocks) {
+            for (const ir::Instr& instr : block.body) {
+                if (instr.op == ir::Op::Call && !instr.call.indirect &&
+                    !instr.callee.empty()) {
+                    ++callSites[instr.callee];
+                }
+            }
+        }
+    }
     for (uint64_t fi = 0; fi < module.functions.size(); ++fi) {
         ir::Function& fn = module.functions[fi];
         if (fn.blocks.empty()) {
@@ -714,7 +742,7 @@ InlineResult inlineCalls(ir::Module& module) {
                     continue;
                 }
                 const ir::Function* callee = nullptr;
-                if (!eligibleCall(callees, fn, instr, callee)) {
+                if (!eligibleCall(callees, callSites, fn, instr, callee)) {
                     ++result.skipped;
                     ++index;
                     continue;
