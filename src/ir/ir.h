@@ -189,10 +189,13 @@ struct Instr {
     Value calleeValue;               // Call: indirect
     std::vector<Argument> arguments; // Call
     CallInfo call;                   // Call
-    // VaStart: how many of the enclosing variadic function's named parameters
-    // arrived in integer and SSE registers. The SysV va_list cursor starts at
-    // the first unnamed slot of each class (VARIADICS.md §6); the counts ride
-    // on the instruction so the target never re-walks the signature.
+    // VaStart: how many integer and SSE register slots the caller filled
+    // before the first variadic argument. The integer count includes a hidden
+    // sret address when the return travels through one, because SysV places
+    // that word in `rdi` like any other integer argument. The SysV va_list
+    // cursor starts at the first unnamed slot of each class (VARIADICS.md §6);
+    // the counts ride on the instruction so the target never re-walks the
+    // signature.
     uint32_t vaNamedGp = 0;
     uint32_t vaNamedSse = 0;
     TrapReason reason = TrapReason::Explicit;  // Trap

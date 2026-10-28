@@ -392,7 +392,8 @@ MemoryResult forwardMemory(ir::Module& module) {
                     state.clear();
                     continue;
                 }
-                if (instr.op == ir::Op::Call || instr.op == ir::Op::Asm) {
+                if (instr.op == ir::Op::Call || instr.op == ir::Op::Asm ||
+                    instr.op == ir::Op::VaStart || instr.op == ir::Op::VaArg) {
                     state.clear();
                     continue;
                 }

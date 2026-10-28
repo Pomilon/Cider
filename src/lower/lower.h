@@ -211,11 +211,10 @@ public:
     // the requested width; VaCopy copies the whole cursor; VaEnd is a no-op.
     std::vector<ir::Value> lowerVaStart(Call& n);
     std::vector<ir::Value> lowerVaArg(Call& n, BasicKind kind);
-    std::vector<ir::Value> lowerVaArg(Call& n, bool pointer);
     std::vector<ir::Value> lowerVaCopy(Call& n);
-    // One VaArg instruction for an already-decided result shape: the two
-    // spelling-based overloads above are the only callers, so the operand
-    // rule and result count live in one place.
+    // One VaArg instruction for an already-decided result shape: the typed
+    // overload above and the `va_arg_ptr` dispatch are the only callers, so
+    // the operand rule and result count live in one place.
     std::vector<ir::Value> lowerVaArgWords(Call& n, TypeRef type,
                                            ir::IRType width);
     // How many named parameters the SysV caller placed in integer registers

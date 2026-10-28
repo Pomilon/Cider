@@ -223,10 +223,16 @@ void checkInstructionUses(const ir::Function& fn, const Definitions& defs,
 
 // VARIADICS.md §8: the two va operations have one legal shape each, and a
 // malformed one is a lowering bug that the target would otherwise read as
-// plausible bytes. VaStart initializes a cursor and answers nothing; VaArg
-// reads one value, so it names exactly one result at a non-void width. Both
-// take their `*va_list` in `operands`, which is also what keeps the address's
-// definition dominating the use (checkInstructionUses above walks it).
+// plausible bytes. VaStart lives only in a variadic function, initializes a
+// cursor, and answers nothing; VaArg reads one scalar value, so it names
+// exactly one result at a non-void width. Both take their `*va_list` in
+// `operands`, which is also what keeps the address's definition dominating
+// the use (checkInstructionUses above walks it).
+bool scalarResultKind(Kind kind) {
+    return kind == Kind::Basic || kind == Kind::Pointer ||
+           kind == Kind::FunctionPtr || kind == Kind::Enum;
+}
+
 void checkVaOperations(const ir::Function& fn,
                        std::vector<StructuralError>& errors) {
     for (const ir::Block& block : fn.blocks) {
@@ -235,13 +241,23 @@ void checkVaOperations(const ir::Function& fn,
                 continue;
             }
             const std::string name = ir::opName(instr.op);
-            if (instr.operands.size() != kOneOperand ||
-                instr.operands[0].width != ir::IRType::Ptr) {
+            const bool pointerOperand =
+                instr.operands.size() == kOneOperand &&
+                instr.operands[0].width == ir::IRType::Ptr &&
+                !instr.operands[0].type.isError() &&
+                (instr.operands[0].type.type->kind() == Kind::Pointer ||
+                 instr.operands[0].type.type->kind() == Kind::FunctionPtr);
+            if (!pointerOperand) {
                 errors.push_back(StructuralError{
                     fn.name, block.label,
                     name + " needs exactly one pointer operand"});
             }
             if (instr.op == ir::Op::VaStart) {
+                if (!fn.signature.variadic()) {
+                    errors.push_back(StructuralError{
+                        fn.name, block.label,
+                        "va_start outside a variadic function"});
+                }
                 if (!instr.results.empty()) {
                     errors.push_back(StructuralError{
                         fn.name, block.label, "va_start has no result"});
@@ -258,6 +274,13 @@ void checkVaOperations(const ir::Function& fn,
                 errors.push_back(StructuralError{
                     fn.name, block.label,
                     "va_arg needs a non-void result width"});
+            }
+            if (instr.type.isError() ||
+                instr.results[0].type != instr.type ||
+                !scalarResultKind(instr.type.type->kind())) {
+                errors.push_back(StructuralError{
+                    fn.name, block.label,
+                    "va_arg needs one scalar result type"});
             }
         }
     }

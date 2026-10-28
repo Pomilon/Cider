@@ -2047,8 +2047,12 @@ void testVariadicPromotionsAndCounts() {
         "func mix(a: int, b: f64, ...) -> int {\n"
         "  var ap: VaList = uninit; va_start(&ap); va_end(&ap); return a;\n"
         "}\n"
+        "func msgf(m: string, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap); va_end(&ap); return 0;\n"
+        "}\n"
         "func main() -> int {\n"
-        "  return sink(\"x\", 1 as i8, 1 as i16, 1.5 as f32, 2.5 as f64, nilPtr)\n"
+        "  return sink(\"x\", 1 as i8, 1 as i16, 1.5 as f32, 2.5 as f64, nilPtr,\n"
+        "              true, 1 as u8)\n"
         "       + count(1) + mix(1, 2.0);\n"
         "}\n");
     check(r.ok, "promoted variadic program lowers: " + r.stage);
@@ -2069,21 +2073,25 @@ void testVariadicPromotionsAndCounts() {
     check(sink != nullptr, "the variadic extern call is emitted");
     if (sink != nullptr) {
         const std::vector<cider::ir::Argument>& args = sink->arguments;
-        check(args.size() == 6, "every argument reaches the call");
-        check(args.size() == 6 &&
+        check(args.size() == 8, "every argument reaches the call");
+        check(args.size() == 8 &&
                   args[1].words.size() == 1 &&
                   args[1].words[0].width == cider::ir::IRType::I32 &&
                   args[2].words[0].width == cider::ir::IRType::I32,
               "i8 and i16 promote to i32 words");
-        check(args.size() == 6 &&
+        check(args.size() == 8 &&
+                  args[6].words[0].width == cider::ir::IRType::I32 &&
+                  args[7].words[0].width == cider::ir::IRType::I32,
+              "bool and u8 promote to i32 words");
+        check(args.size() == 8 &&
                   args[3].words[0].width == cider::ir::IRType::F64 &&
                   args[4].words[0].width == cider::ir::IRType::F64,
               "f32 promotes to f64");
-        check(args.size() == 6 &&
+        check(args.size() == 8 &&
                   args[3].width == cider::ir::IRType::F64 &&
                   args[4].width == cider::ir::IRType::F64,
               "promoted floats stay in the SSE class");
-        check(args.size() == 6 &&
+        check(args.size() == 8 &&
                   args[5].words[0].width == cider::ir::IRType::Ptr,
               "a pointer passes unchanged");
     }
@@ -2107,6 +2115,10 @@ void testVariadicPromotionsAndCounts() {
     const cider::ir::Instr* mixed = vaStartOf("mix");
     check(mixed != nullptr && mixed->vaNamedGp == 1 && mixed->vaNamedSse == 1,
           "a named f64 counts one SSE register and no GP word");
+    const cider::ir::Instr* twoWord = vaStartOf("msgf");
+    check(twoWord != nullptr && twoWord->vaNamedGp == 2 &&
+              twoWord->vaNamedSse == 0,
+          "a two-word named parameter counts two GP words");
 
     Lowered ms = lower(
         "msabi extern func msink(fmt: *char, ...) -> int;\n"
@@ -2142,7 +2154,8 @@ void testVaArgWidthsAndCopy() {
         "  va_copy(&other, &ap);\n"
         "  va_end(&ap); va_end(&other);\n"
         "  return b;\n"
-        "}\n");
+        "}\n"
+        "func copyonly(dst: *VaList, src: *VaList) -> void { va_copy(dst, src); }\n");
     check(r.ok, "every va_arg entry lowers: " + r.stage);
     if (!r.ok) {
         return;
@@ -2164,11 +2177,116 @@ void testVaArgWidthsAndCopy() {
               widths[3] == cider::ir::IRType::F64 &&
               widths[4] == cider::ir::IRType::Ptr,
           "each VaArg carries its entry's width");
-    check(countOp(*fn, cider::ir::Op::Load) >= 3 &&
-              countOp(*fn, cider::ir::Op::Store) >= 3,
-          "va_copy copies the whole cursor by words");
+    const auto* copy = find(r.module.get(), "copyonly");
+    check(copy != nullptr && countOp(*copy, cider::ir::Op::Store) == 3,
+          "va_copy copies exactly the SysV cursor's three words (stores " +
+              std::to_string(copy != nullptr
+                                 ? countOp(*copy, cider::ir::Op::Store)
+                                 : -1) +
+              ")");
+    std::vector<int64_t> steps;
+    if (copy != nullptr) {
+        for (const auto& block : copy->blocks) {
+            for (const auto& instr : block.body) {
+                if (instr.op == cider::ir::Op::Store) {
+                    steps.push_back(instr.displacement);
+                }
+            }
+        }
+    }
+    check(steps == std::vector<int64_t>{0, cider::layout::kSizePointer,
+                                        2 * cider::layout::kSizePointer},
+          "the copy stores step through the cursor at 8-byte strides");
     check(countOp(*fn, cider::ir::Op::Call) == 0,
           "va_end emits nothing");
+
+    // VARIADICS.md §7: the Microsoft cursor is one 8-byte slot, so its copy
+    // is one word, not SysV's three.
+    Lowered ms = lower(
+        "from std.varargs import VaList, va_copy;\n"
+        "msabi func m(dst: *VaList, src: *VaList) -> void { va_copy(dst, src); }\n"
+        "func main() -> int { return 0; }\n");
+    check(ms.ok, "an msabi va_copy lowers: " + ms.stage);
+    if (ms.ok) {
+        const auto* m = find(ms.module.get(), "m");
+        check(m != nullptr && countOp(*m, cider::ir::Op::Store) == 1,
+              "an msabi cursor copy is one word (stores " +
+                  std::to_string(m != nullptr
+                                     ? countOp(*m, cider::ir::Op::Store)
+                                     : -1) +
+                  ")");
+    }
+}
+
+void testVariadicSignatureShapes() {
+    std::printf("variadic signature shapes\n");
+    // A call through a variadic function pointer still carries the call bit:
+    // the signature, not the callee spelling, decides it (VARIADICS.md §8).
+    Lowered fp = lower(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func main() -> int {\n"
+        "  var p: *func(*char, ...) -> int = &sink;\n"
+        "  return p(\"x\", 1);\n"
+        "}\n");
+    check(fp.ok, "a variadic pointer call lowers: " + fp.stage);
+    bool indirectMarked = false;
+    if (fp.ok) {
+        const auto* main = find(fp.module.get(), "main");
+        for (const auto& block : main->blocks) {
+            for (const auto& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call && instr.call.indirect) {
+                    indirectMarked = instr.call.variadic;
+                }
+            }
+        }
+    }
+    check(indirectMarked, "an indirect variadic call is marked");
+    // Named parameters keep their declared types: only the tail promotes.
+    Lowered named = lower(
+        "extern func small(x: i8, ...) -> int;\n"
+        "func main() -> int { return small(1 as i8, 2 as i8); }\n");
+    check(named.ok, "named parameters keep their type: " + named.stage);
+    if (named.ok) {
+        const auto* main = find(named.module.get(), "main");
+        const cider::ir::Instr* call = nullptr;
+        for (const auto& block : main->blocks) {
+            for (const auto& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call) {
+                    call = &instr;
+                }
+            }
+        }
+        check(call != nullptr && call->arguments.size() == 2 &&
+                  call->arguments[0].words[0].width == cider::ir::IRType::I8 &&
+                  call->arguments[1].words[0].width == cider::ir::IRType::I32,
+              "the named i8 stays i8 while the tail promotes");
+    }
+    // A >2-word return travels through a hidden sret pointer, which occupies
+    // the caller's first integer argument slot. The SysV cursor's gp_offset
+    // must therefore skip it as well as `n`.
+    Lowered sret = lower(
+        "from std.varargs import VaList, va_start, va_end;\n"
+        "struct Big { var a: i64; var b: i64; var c: i64; }\n"
+        "func big(n: int, ...) -> Big {\n"
+        "  var ap: VaList = uninit; va_start(&ap); va_end(&ap);\n"
+        "  return Big { a: 1, b: 2, c: 3 };\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(sret.ok, "a variadic sret function lowers: " + sret.stage);
+    if (sret.ok) {
+        const auto* big = find(sret.module.get(), "big");
+        const cider::ir::Instr* start = nullptr;
+        for (const auto& block : big->blocks) {
+            for (const auto& instr : block.body) {
+                if (instr.op == cider::ir::Op::VaStart) {
+                    start = &instr;
+                }
+            }
+        }
+        check(start != nullptr && start->vaNamedGp == 2 &&
+                  start->vaNamedSse == 0,
+              "the hidden sret word counts as a named GP word");
+    }
 }
 
 int main() {
@@ -2182,6 +2300,7 @@ int main() {
     testVariadicLowering();
     testVariadicPromotionsAndCounts();
     testVaArgWidthsAndCopy();
+    testVariadicSignatureShapes();
     testGlobal();
     testArithmetic();
     testTrapFlag();

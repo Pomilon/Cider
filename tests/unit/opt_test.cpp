@@ -1406,24 +1406,33 @@ void testVaOperationStructure() {
     struct Shape {
         bool startResult = false;
         bool startBadOperand = false;
+        bool startBadType = false;
+        bool startNonVariadic = false;
         bool argNoResult = false;
         bool argVoidWidth = false;
         bool argBadOperand = false;
+        bool argBadType = false;
     };
     auto validate = [](Shape shape) {
         Ir ir;
         cider::TypeRef t = ir.i32();
         cider::TypeRef p = ir.ptr();
+        // A function signature is where va_start's context lives: the shape
+        // is legal only in a variadic body (VARIADICS.md §5).
+        ir.fn->signature = cider::Signature(
+            {}, t.type, cider::Abi::SysV, !shape.startNonVariadic);
         ir.emit(ir.constant(10, 0, cider::ir::IRType::Ptr, p));
+        ir.emit(ir.constant(12, 7, cider::ir::IRType::I32, t));
         cider::ir::Instr start;
         start.op = cider::ir::Op::VaStart;
-        start.operands.push_back(ir.value(10, cider::ir::IRType::Ptr, p));
+        start.operands.push_back(ir.value(
+            10, cider::ir::IRType::Ptr, shape.startBadType ? t : p));
         if (shape.startBadOperand) {
             start.operands.push_back(ir.value(10, cider::ir::IRType::Ptr, p));
         }
         if (shape.startResult) {
             start.results.push_back(
-                ir.value(12, cider::ir::IRType::I32, t));
+                ir.value(13, cider::ir::IRType::I32, t));
         }
         ir.emit(start);
         cider::ir::Instr read;
@@ -1437,10 +1446,13 @@ void testVaOperationStructure() {
                 ir.value(10, cider::ir::IRType::Ptr, p));
         }
         if (!shape.argNoResult) {
-            read.results.push_back(
-                ir.value(11, read.width, t));
+            read.results.push_back(ir.value(
+                11, read.width,
+                shape.argBadType ? ir.boolean() : t));
         }
         ir.emit(read);
+        // A value the return can name in every shape: without it the
+        // no-result case failed for an undefined use, not for its own shape.
         ir.finishRet(0, shape.argNoResult ? 12 : 11,
                      cider::ir::IRType::I32, t);
         return cider::opt::checkModule(ir.module);
@@ -1450,12 +1462,18 @@ void testVaOperationStructure() {
           "va_start with a result is refused");
     check(!validate(Shape{.startBadOperand = true}).empty(),
           "va_start needs exactly one pointer operand");
+    check(!validate(Shape{.startBadType = true}).empty(),
+          "va_start needs a pointer-typed operand");
+    check(!validate(Shape{.startNonVariadic = true}).empty(),
+          "va_start outside a variadic function is refused");
     check(!validate(Shape{.argNoResult = true}).empty(),
           "va_arg without a result is refused");
     check(!validate(Shape{.argVoidWidth = true}).empty(),
           "va_arg with a void width is refused");
     check(!validate(Shape{.argBadOperand = true}).empty(),
           "va_arg needs exactly one pointer operand");
+    check(!validate(Shape{.argBadType = true}).empty(),
+          "va_arg needs one scalar result type");
 }
 
 // Phi lowering removes phis and leaves ordinary copies; a critical edge gets

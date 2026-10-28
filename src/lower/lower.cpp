@@ -9730,6 +9730,13 @@ std::vector<ir::Value> Lowerer::lowerVaStart(Call& n) {
     instr.loc = n.pos;
     instr.operands.push_back(words[kFirstWord]);
     instr.vaNamedGp = namedGpWords(*currentSignature_);
+    // A return wider than the register row travels through a hidden buffer
+    // whose address is the caller's first integer argument (SysV sret). It is
+    // a word the caller placed before every variadic argument, so `gp_offset`
+    // must step over it even though it has no source spelling.
+    if (needsSret(currentSignature_->returnType())) {
+        ++instr.vaNamedGp;
+    }
     instr.vaNamedSse = namedSseRegs(*currentSignature_);
     emit(std::move(instr));
     return {};
@@ -9742,15 +9749,6 @@ std::vector<ir::Value> Lowerer::lowerVaArg(Call& n, BasicKind kind) {
         return {undefined()};
     }
     return lowerVaArgWords(n, type, width);
-}
-
-std::vector<ir::Value> Lowerer::lowerVaArg(Call& n, bool pointer) {
-    (void)pointer;
-    // `va_arg_ptr` answers `*void`: an untyped address, one machine word. The
-    // source declaration in std.varargs is the authority for that spelling;
-    // this path only carries it into IR.
-    return lowerVaArgWords(n, TypeRef{ctx_.pointer(ctx_.void_())},
-                           ir::IRType::Ptr);
 }
 
 std::vector<ir::Value> Lowerer::lowerVaArgWords(Call& n, TypeRef type,
@@ -9805,9 +9803,18 @@ std::vector<ir::Value> Lowerer::lowerVaCopy(Call& n) {
         return {undefined()};
     }
     TypeRef word{ctx_.basic(BasicKind::U64)};
-    constexpr uint64_t kCursorWords =
-        static_cast<uint64_t>(layout::kSizeVaList / layout::kSizePointer);
-    for (uint64_t i = 0; i < kCursorWords; ++i) {
+    // VARIADICS.md §6-7: SysV's cursor is the 24-byte __va_list_tag; the
+    // Microsoft cursor is one 8-byte stack slot. The copy follows the
+    // enclosing function's convention (an explicit msabi spelling) and the
+    // target's default when no function signature is in scope.
+    const bool msabi = currentSignature_ != nullptr
+                           ? currentSignature_->abi() == Abi::MsAbi
+                           : target_ == target::Kind::Uefi;
+    const uint64_t cursorWords =
+        msabi ? 1
+              : static_cast<uint64_t>(layout::kSizeVaList /
+                                      layout::kSizePointer);
+    for (uint64_t i = 0; i < cursorWords; ++i) {
         ir::Instr load;
         load.op = ir::Op::Load;
         load.loc = n.pos;
@@ -9815,7 +9822,9 @@ std::vector<ir::Value> Lowerer::lowerVaCopy(Call& n) {
         load.width = ir::IRType::U64;
         load.addressBase = src[kFirstWord];
         load.displacement = static_cast<int64_t>(i) * layout::kSizePointer;
-        load.isPure = true;
+        // A cursor read observes memory and must not be treated as a pure
+        // value that a later pass may move or delete.
+        load.isPure = false;
         ir::Value cell = newValue(load.width, word, n.pos);
         load.results.push_back(cell);
         emit(std::move(load));
@@ -9861,7 +9870,11 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         case resolve::Intrinsic::VaArgF64:
             return lowerVaArg(n, BasicKind::F64);
         case resolve::Intrinsic::VaArgPtr:
-            return lowerVaArg(n, true);
+            // `va_arg_ptr` answers `*void`: an untyped address, one machine
+            // word. The source declaration in std.varargs is the authority;
+            // this path only carries its spelling into IR.
+            return lowerVaArgWords(n, TypeRef{ctx_.pointer(ctx_.void_())},
+                                   ir::IRType::Ptr);
         case resolve::Intrinsic::VaCopy:
             return lowerVaCopy(n);
         case resolve::Intrinsic::VaEnd:
@@ -10739,9 +10752,9 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 return {undefined()};
             }
             if (isFloat) {
-                arg.width = *argType.type->basic() == BasicKind::F32
-                                ? ir::IRType::F32
-                                : ir::IRType::F64;
+                // The only float promotion in the table is f32 -> f64, so a
+                // promoted float is always an f64 in an SSE slot.
+                arg.width = ir::IRType::F64;
             }
             instr.arguments.push_back(std::move(arg));
             continue;
