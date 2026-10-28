@@ -3419,6 +3419,23 @@ void testVaStartGenericContext() {
               hasDiagnostic(methodFromVariadic,
                             "only valid in a variadic function"),
           "a generic method does not inherit the caller's variadic context");
+    // A local class declared inside a variadic function walks its methods
+    // while that caller's context is set: the method walk must clear it too.
+    Checked localMethod = check(
+        "from std.varargs import VaList, va_start;\n"
+        "func f(n: int, ...) -> int {\n"
+        "  class Local {\n"
+        "    var x: int;\n"
+        "    func peek() -> int {\n"
+        "      var ap: VaList = uninit; va_start(&ap); return this->x;\n"
+        "    }\n"
+        "  }\n"
+        "  return n;\n"
+        "}\n",
+        varargsLoader());
+    check(!localMethod.ok &&
+              hasDiagnostic(localMethod, "only valid in a variadic function"),
+          "a local class method does not inherit the caller's variadic context");
 }
 
 // A variadic signature keeps its `...` through function-pointer assignment:

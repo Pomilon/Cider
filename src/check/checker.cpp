@@ -2179,10 +2179,16 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
         TypeRef saved = funcReturn_;
         bool was = inFunc_;
+        // A method is never variadic (VARIADICS.md §2). A local class
+        // declared inside a variadic function walks here with that caller's
+        // context still set; clearing it keeps `va_start` out of a body with
+        // no saved argument state to read.
+        bool wasVariadic = inVariadicFunction_;
         std::optional<DeclId> savedClass = currentClass_;
         TypeRef savedSelf = currentSelf_;
         funcReturn_ = TypeRef{ret};
         inFunc_ = true;
+        inVariadicFunction_ = false;
         currentClass_ = id;
         currentSelf_ = TypeRef{self};
         if (sink_ != nullptr) {
@@ -2195,6 +2201,7 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         }
         funcReturn_ = saved;
         inFunc_ = was;
+        inVariadicFunction_ = wasVariadic;
         currentClass_ = savedClass;
         currentSelf_ = savedSelf;
         popScope();
