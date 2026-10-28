@@ -100,6 +100,39 @@ constexpr int64_t kNoBytes = 0;
 // more refuses. The comparison reads against a named one, not a bare digit.
 constexpr uint64_t kOneBase = 1;
 
+// VARIADICS.md §5: the compiler-owned library module and the canonical
+// spellings it exports. Recognition is exact-name and module-scoped, so a
+// user function called `va_start` stays an ordinary function.
+constexpr const char* kVarargsModule = "std.varargs";
+
+Intrinsic intrinsicForName(const std::string& name) {
+    if (name == "va_start") {
+        return Intrinsic::VaStart;
+    }
+    if (name == "va_copy") {
+        return Intrinsic::VaCopy;
+    }
+    if (name == "va_end") {
+        return Intrinsic::VaEnd;
+    }
+    if (name == "va_arg_i32") {
+        return Intrinsic::VaArgI32;
+    }
+    if (name == "va_arg_i64") {
+        return Intrinsic::VaArgI64;
+    }
+    if (name == "va_arg_u64") {
+        return Intrinsic::VaArgU64;
+    }
+    if (name == "va_arg_f64") {
+        return Intrinsic::VaArgF64;
+    }
+    if (name == "va_arg_ptr") {
+        return Intrinsic::VaArgPtr;
+    }
+    return Intrinsic::None;
+}
+
 }
 
 const Scope* Resolver::makeScope(const Scope* parent, const std::string& module) {
@@ -1173,6 +1206,7 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 alias->aliasTarget = target->aliasTarget;
                 alias->init = target->init;
                 alias->isExtern = target->isExtern;
+                alias->intrinsic = target->intrinsic;
                 if (alias->kind == DeclKind::Alias) {
                     alias->homeModule = from->module;
                 }
@@ -1238,12 +1272,18 @@ void Resolver::declareModule(const std::string& module, Program& program,
             Decl* d = bind(scope, DeclKind::Func, fn->name, fn->pos);
             d->type = TypeRef{ctx_.wildcard()};
             d->typeParams = fn->typeParams.size();
+            if (d->scope != nullptr && d->scope->module == kVarargsModule) {
+                d->intrinsic = intrinsicForName(d->name);
+            }
             continue;
         }
         if (const auto* ext = dynamic_cast<const ExternFunc*>(unwrapped)) {
             Decl* d = bind(scope, DeclKind::Func, ext->name, ext->pos);
             d->type = TypeRef{ctx_.wildcard()};
             d->isExtern = true;
+            if (d->scope != nullptr && d->scope->module == kVarargsModule) {
+                d->intrinsic = intrinsicForName(d->name);
+            }
             continue;
         }
         if (const auto* ext = dynamic_cast<const ExternVar*>(unwrapped)) {

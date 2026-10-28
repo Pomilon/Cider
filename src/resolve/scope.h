@@ -30,6 +30,22 @@ enum class DeclKind {
     TypeParam,
 };
 
+// VARIADICS.md §5: the compiler supplies these bodies, and the library
+// declares their public signatures. The name is canonical only inside
+// `std.varargs`; an ordinary function that happens to share a spelling is
+// not an intrinsic (the compiler never special-cases arbitrary user code).
+enum class Intrinsic {
+    None,
+    VaStart,
+    VaCopy,
+    VaEnd,
+    VaArgI32,
+    VaArgI64,
+    VaArgU64,
+    VaArgF64,
+    VaArgPtr,
+};
+
 struct Decl {
     DeclKind kind = DeclKind::Var;
     std::string name;
@@ -38,6 +54,8 @@ struct Decl {
     DeclId id;
     const Scope* scope = nullptr;
     Position pos{"", 1, 1};
+    // Func only, recognized: the std.varargs entry this declaration names.
+    Intrinsic intrinsic = Intrinsic::None;
     // Extern only: declared in Cider, defined by the linker. Calls keep
     // the bare spelling on every backend (FEATURES §4.4): mangling one
     // would point at a symbol nothing defines.

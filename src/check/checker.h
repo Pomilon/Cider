@@ -178,6 +178,10 @@ public:
     // re-running overload resolution.
     const resolve::Decl* operatorDecl(const Binary* expr) const;
     const resolve::Decl* operatorDecl(const Unary* expr) const;
+    // VARIADICS.md §5: the std.varargs entry a direct call names, or None
+    // for every ordinary call. Lowering emits the intrinsic form from this
+    // record instead of resolving the callee a second time.
+    resolve::Intrinsic intrinsicOf(const Call& expr) const;
     bool isMemberOperator(const Binary* expr) const;
     bool isMemberOperator(const Unary* expr) const;
     bool isOperatorIndex(const Index* expr) const;
@@ -519,6 +523,13 @@ private:
     std::unordered_set<const Call*> operatorCalls_;
     std::unordered_set<const Assign*> operatorAssigns_;
     std::unordered_map<const Field*, TypeRef> operatorArrows_;
+    // VARIADICS.md §5: every direct call that named a std.varargs entry,
+    // recorded while checking so lowering never re-resolves the name.
+    std::unordered_map<const Call*, resolve::Intrinsic> intrinsicCalls_;
+    // Whether the body being walked belongs to a variadic function. va_start
+    // reads that function's saved argument state, so the flag gates it; the
+    // other entries take an initialized list and need no context.
+    bool inVariadicFunction_ = false;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

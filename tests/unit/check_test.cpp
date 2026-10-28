@@ -3311,6 +3311,33 @@ void testVaListByValue() {
     check(byPtr.ok, "a va_list is passed by pointer: " + byPtr.stage);
 }
 
+// VARIADICS.md §5: va_start initializes a list from the enclosing function's
+// saved argument state, so it exists only where that state does. The other
+// std.varargs entries take an initialized list and work anywhere (a helper
+// that only reads arguments is the ordinary `printf` v-helper shape).
+void testVaStartContext() {
+    std::printf("va_start context\n");
+    Checked inside = check(
+        "from std.varargs import VaList, va_start, va_end;\n"
+        "func f(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit;\n"
+        "  va_start(&ap); va_end(&ap); return n;\n"
+        "}\n",
+        varargsLoader());
+    check(inside.ok, "va_start is valid in a variadic function");
+    Checked outside = check(
+        "from std.varargs import VaList, va_start;\n"
+        "func f() -> void { var ap: VaList = uninit; va_start(&ap); }\n",
+        varargsLoader());
+    check(!outside.ok && hasDiagnostic(outside, "only valid in a variadic function"),
+          "va_start outside a variadic function is rejected");
+    Checked helper = check(
+        "from std.varargs import VaList, va_arg_i32;\n"
+        "func next(ap: *VaList) -> i32 { return va_arg_i32(ap); }\n",
+        varargsLoader());
+    check(helper.ok, "va_arg works in a non-variadic helper");
+}
+
 // A variadic signature keeps its `...` through function-pointer assignment:
 // the flag takes part in sameSignature (VARIADICS.md §2-3), so a variadic
 // pointer is never usable where a non-variadic one is wanted. The ABI rides
@@ -3420,6 +3447,7 @@ int main() {
     testVariadicCalls();
     testVariadicBodySignature();
     testVaListByValue();
+    testVaStartContext();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

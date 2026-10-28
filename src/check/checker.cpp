@@ -82,6 +82,12 @@ const resolve::Decl* Checker::operatorDecl(const Unary* expr) const {
     return found == unaryOperatorDecls_.end() ? nullptr : found->second;
 }
 
+resolve::Intrinsic Checker::intrinsicOf(const Call& expr) const {
+    auto found = intrinsicCalls_.find(&expr);
+    return found == intrinsicCalls_.end() ? resolve::Intrinsic::None
+                                          : found->second;
+}
+
 bool Checker::isMemberOperator(const Binary* expr) const {
     return memberOperatorCalls_.find(expr) != memberOperatorCalls_.end();
 }
@@ -1519,8 +1525,10 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     }
     TypeRef saved = funcReturn_;
     bool was = inFunc_;
+    bool wasVariadic = inVariadicFunction_;
     funcReturn_ = TypeRef{ret};
     inFunc_ = true;
+    inVariadicFunction_ = n.variadic;
     if (sink_ != nullptr) {
         sink_->onFuncDecl(n);
     } else {
@@ -1528,6 +1536,7 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     }
     funcReturn_ = saved;
     inFunc_ = was;
+    inVariadicFunction_ = wasVariadic;
     popScope();
 }
 
@@ -3313,8 +3322,12 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
     TypeRef saved = funcReturn_;
     bool was = inFunc_;
+    bool wasVariadic = inVariadicFunction_;
     funcReturn_ = TypeRef{ret};
     inFunc_ = true;
+    // A closure is its own function and can never be variadic, so it has no
+    // saved argument state for va_start to read (VARIADICS.md §5).
+    inVariadicFunction_ = false;
     // The discovery walk runs with the sink detached, like a generic
     // instantiation walk: nothing lowers yet, so the lowerer cannot meet a
     // half-built literal, and errors here are the only copy — the lowering
@@ -3331,6 +3344,7 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
     if (after != before) {
         funcReturn_ = saved;
         inFunc_ = was;
+        inVariadicFunction_ = wasVariadic;
         popScope();
         return errorRef();
     }
@@ -3338,6 +3352,7 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
         fail(captures.front().pos, "captures are not supported");
         funcReturn_ = saved;
         inFunc_ = was;
+        inVariadicFunction_ = wasVariadic;
         popScope();
         return errorRef();
     }
@@ -3352,6 +3367,7 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
     }
     funcReturn_ = saved;
     inFunc_ = was;
+    inVariadicFunction_ = wasVariadic;
     popScope();
     return TypeRef{ctx_.closure(std::move(sig))};
 }
@@ -4831,6 +4847,9 @@ TypeRef Checker::checkUnionHas(Call& expr, const Field& callee, TypeRef object) 
 TypeRef Checker::checkCall(Call& expr) {
     Signature sig;
     bool hasSig = false;
+    // The declaration a bare or module-qualified callee names, when there is
+    // one: intrinsic recognition reads its module-scoped tag (VARIADICS §5).
+    const resolve::Decl* calleeDecl = nullptr;
     // `v.hasI()`: a union answers whether the named member is live. This is
     // not a method lookup — unions have no methods — but the second of the
     // three union reads (TYPES.md 4.6). Anything not shaped like hasM, or on
@@ -4906,6 +4925,7 @@ TypeRef Checker::checkCall(Call& expr) {
                 }
                 sig = decl->sig;
                 hasSig = true;
+                calleeDecl = decl;
             }
         }
     }
@@ -4934,6 +4954,7 @@ TypeRef Checker::checkCall(Call& expr) {
                             }
                             sig = member->sig;
                             hasSig = true;
+                            calleeDecl = member;
                         }
                     }
                 }
@@ -4996,6 +5017,19 @@ TypeRef Checker::checkCall(Call& expr) {
     if (!hasSig) {
         fail(expr.pos, "not callable");
         return errorRef();
+    }
+    if (calleeDecl != nullptr &&
+        calleeDecl->intrinsic != resolve::Intrinsic::None) {
+        intrinsicCalls_[&expr] = calleeDecl->intrinsic;
+        // VARIADICS.md §5: va_start initializes the list from the enclosing
+        // function's saved argument state. Outside a variadic body there is
+        // no such state, while the other entries only need an initialized
+        // *VaList and so work in any function.
+        if (calleeDecl->intrinsic == resolve::Intrinsic::VaStart &&
+            !inVariadicFunction_) {
+            fail(expr.pos, "va_start is only valid in a variadic function");
+            return errorRef();
+        }
     }
     if (!checkCallArguments(expr, sig, false)) {
         return errorRef();
