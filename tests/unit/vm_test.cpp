@@ -41,6 +41,32 @@ struct Lowered {
     std::unique_ptr<cider::ir::Module> module;
 };
 
+// modules/std/varargs.cid, embedded: the VM tests import the public surface
+// without depending on a working directory (VARIADICS.md §5).
+const char* kVarargsSource =
+    "export type VaList = va_list;\n"
+    "\n"
+    "extern func va_start(ap: *VaList) -> void;\n"
+    "extern func va_copy(dst: *VaList, src: *VaList) -> void;\n"
+    "extern func va_end(ap: *VaList) -> void;\n"
+    "\n"
+    "extern func va_arg_i32(ap: *VaList) -> i32;\n"
+    "extern func va_arg_i64(ap: *VaList) -> i64;\n"
+    "extern func va_arg_u64(ap: *VaList) -> u64;\n"
+    "extern func va_arg_f64(ap: *VaList) -> f64;\n"
+    "extern func va_arg_ptr(ap: *VaList) -> *void;\n";
+
+cider::resolve::Resolver::ModuleLoader varargsLoader() {
+    return [](const std::string& name) -> std::unique_ptr<cider::Program> {
+        if (name != "std.varargs") {
+            return nullptr;
+        }
+        cider::Lexer lexer("varargs.cid", kVarargsSource);
+        cider::Parser parser("varargs.cid", lexer.lex());
+        return parser.parse();
+    };
+}
+
 Lowered lower(const std::string& text, bool checks = false,
               bool entryFixture = true) {
     Lowered out;
@@ -61,7 +87,8 @@ Lowered lower(const std::string& text, bool checks = false,
         out.stage = "parse";
         return out;
     }
-    auto resolver = std::make_unique<cider::resolve::Resolver>(*out.types);
+    auto resolver = std::make_unique<cider::resolve::Resolver>(
+        *out.types, varargsLoader());
     if (!resolver->resolveProgram(*program, "main")) {
         out.stage = "resolve";
         return out;
@@ -1210,6 +1237,67 @@ void testStructDeleteVm() {
               copt.error);
 }
 
+// VARIADICS.md §6/§8: a Cider-defined variadic function runs in the VM. The
+// interpreter builds the same SysV register-save area and stack cursor the
+// native prologue does, so every va_arg_* spelling answers the promoted
+// argument on both legs.
+void testVariadicVm() {
+    std::printf("variadic vm\n");
+    auto both = [&](const std::string& text, int want, const std::string& what) {
+        Lowered program = lower(text);
+        check(program.ok, what + " lowers: " + program.stage);
+        if (!program.ok) { return; }
+        cider::vm::VmResult unr = cider::vm::run(*program.module, "");
+        check(unr.ok && unr.exitCode == want && unr.stderrText.empty(),
+              what + " unoptimised: " + unr.error);
+        cider::opt::run(*program.module);
+        cider::vm::VmResult opr = cider::vm::run(*program.module, "");
+        check(opr.ok && opr.exitCode == want && opr.stderrText.empty(),
+              what + " optimised: " + opr.error);
+    };
+    both("from std.varargs import VaList, va_start, va_arg_i32, va_arg_f64, va_end;\n"
+         "func sum(n: int, ...) -> int {\n"
+         "  var ap: VaList = uninit; va_start(&ap);\n"
+         "  var a: i32 = va_arg_i32(&ap); var b: f64 = va_arg_f64(&ap);\n"
+         "  va_end(&ap); return n + a + (b as int);\n"
+         "}\n"
+         "func main() -> int { return sum(1, 2, 3.5); }\n",
+         6, "scalar variadic sum");
+    // Every integer spelling reads the next GPR slot, and the seventh
+    // integer word crosses into the overflow area.
+    both("from std.varargs import VaList, va_start, va_arg_i32, va_arg_i64,\n"
+         "    va_arg_u64, va_arg_ptr, va_end;\n"
+         "var g: int = 5;\n"
+         "func mix(n: int, ...) -> int {\n"
+         "  var ap: VaList = uninit; va_start(&ap);\n"
+         "  var a: i64 = va_arg_i64(&ap); var b: u64 = va_arg_u64(&ap);\n"
+         "  var p: *void = va_arg_ptr(&ap);\n"
+         "  var c: i32 = va_arg_i32(&ap); var d: i32 = va_arg_i32(&ap);\n"
+         "  var e: i32 = va_arg_i32(&ap);\n"
+         "  va_end(&ap);\n"
+         "  var ok: int = 0;\n"
+         "  if (p != nil) { ok = 1; }\n"
+         "  return (a as int) + (b as int) + ok + c + d + e;\n"
+         "}\n"
+         "func main() -> int { return mix(0, 10 as i64, 20 as u64, &g as *void,"
+         " 1, 2, 3); }\n",
+         37, "integer, pointer and overflow variadic args");
+    // A copied cursor keeps its own position: the cursor is ordinary VM
+    // memory, so va_copy's loads and stores see the same 24 bytes the native
+    // leg would copy.
+    both("from std.varargs import VaList, va_start, va_copy, va_arg_i32, va_end;\n"
+         "func second(n: int, ...) -> int {\n"
+         "  var ap: VaList = uninit; va_start(&ap);\n"
+         "  var copy: VaList = uninit; va_copy(&copy, &ap);\n"
+         "  var a: i32 = va_arg_i32(&ap); var b: i32 = va_arg_i32(&ap);\n"
+         "  var c: i32 = va_arg_i32(&copy);\n"
+         "  va_end(&ap); va_end(&copy);\n"
+         "  return n + a * 10 + b + c;\n"
+         "}\n"
+         "func main() -> int { return second(1, 2, 3); }\n",
+         26, "copied va_list cursor");
+}
+
 int main() {
     std::printf("vm_test — the interpreter answers\n\n");
     testExit();
@@ -1234,6 +1322,7 @@ int main() {
     testOperatorIndexAssignmentVm();
     testStructDeleteVm();
     testArrowOperatorVm();
+    testVariadicVm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

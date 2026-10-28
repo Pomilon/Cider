@@ -54,6 +54,30 @@ constexpr uint64_t kFloat32Bytes = 4;
 constexpr int64_t kZeroPointer = 0;
 constexpr uint64_t kFrameLimit = 100000;
 
+// VARIADICS.md §6: a SysV variadic callee keeps the incoming argument
+// registers in a 176-byte area, and the VM lays out the same slots the native
+// prologue writes. Six GPR slots sit at 0..40, two padding words follow, and
+// eight 16-byte XMM slots start at 48. The counts, not literals, drive every
+// read.
+constexpr uint64_t kSysVIntRegs = 6;
+constexpr uint64_t kSysVSseRegs = 8;
+constexpr uint64_t kSysVVarargsGpBase = 0;
+constexpr uint64_t kSysVVarargsFpBase =
+    kSysVIntRegs * layout::kSizePointer;
+constexpr uint64_t kSysVVarargsGpLimit =
+    kSysVVarargsGpBase + kSysVIntRegs * layout::kSizePointer;
+constexpr uint64_t kSysVVarargsXmmSlot = 16;
+constexpr uint64_t kSysVVarargsFpLimit =
+    kSysVVarargsFpBase + kSysVSseRegs * kSysVVarargsXmmSlot;
+constexpr uint64_t kSysVVarargsSaveBytes =
+    kSysVVarargsFpBase + kSysVSseRegs * kSysVVarargsXmmSlot;
+// The four `__va_list_tag` fields: two 32-bit cursors, then the overflow
+// pointer and the register-save base.
+constexpr uint64_t kSysVVarargsGpField = 0;
+constexpr uint64_t kSysVVarargsFpField = 4;
+constexpr uint64_t kSysVVarargsOverflowField = 8;
+constexpr uint64_t kSysVVarargsSaveField = 16;
+
 // The three ways a program dies on hardware, by the number the signal
 // carries: an illegal divide or an emitted trap, a divide by zero or a
 // quotient that does not fit, and a read or write outside its own memory.
@@ -212,6 +236,11 @@ struct Frame {
     // model has to let them see each other's writes.
     int64_t regs[kRegisterCount] = {};
     int64_t base = 0;
+    // VARIADICS.md §6: the address of this activation's 176-byte SysV
+    // register-save area and of its overflow words. Zero when the function is
+    // not variadic, which is what makes `va_start` outside one a refusal.
+    int64_t varargsSave = 0;
+    int64_t varargsOverflow = 0;
 };
 
 struct Runner {
@@ -1409,9 +1438,19 @@ struct Runner {
     // Arguments arrive in register order, results go back in it.
     bool call(const Instr& instr, std::vector<Value>& results) {
         std::vector<int64_t> args;
+        // VARIADICS.md §6: the VM has no register file to spill, so it lays
+        // the same argument words into the SysV save area itself. The class
+        // of every word rides beside the value: an f32/f64 argument whose one
+        // word the caller sent in an SSE register, and an integer word for
+        // every other shape.
+        std::vector<IRType> classes;
         for (const Argument& arg : instr.arguments) {
+            const bool floatArg =
+                (arg.width == IRType::F32 || arg.width == IRType::F64) &&
+                arg.words.size() == kOneCell;
             for (const Value& word : arg.words) {
                 args.push_back(read(word));
+                classes.push_back(floatArg ? arg.width : IRType::Void);
             }
         }
         const Function* target = nullptr;
@@ -1444,7 +1483,7 @@ struct Runner {
                 return refuse(instr.loc, "vm call arguments do not match the callee");
             }
             std::vector<int64_t> answer;
-            if (!runFunction(*target, args, answer)) {
+            if (!runFunction(*target, args, classes, answer)) {
                 return false;
             }
             if (programDone) {
@@ -1466,18 +1505,88 @@ struct Runner {
     // One activation of a function: a fresh region of cells zeroed, the
     // parameters bound in order, then the blocks walked from the entry.
     bool runFunction(const Function& fn, const std::vector<int64_t>& args,
+                     const std::vector<IRType>& classes,
                      std::vector<int64_t>& values) {
         if (frames.size() >= kFrameLimit) {
             return refuse(fn.loc, "vm call depth exhausted");
         }
+        // VARIADICS.md §6/§8: the interpreter implements the SysV convention.
+        // A Microsoft-x64 callee homes its arguments differently, so running
+        // it here would answer reads the native prologue never made.
+        const bool variadic = fn.signature.variadic();
+        if (variadic && fn.signature.abi() == Abi::MsAbi) {
+            return refuse(fn.loc, "vm cannot run a variadic msabi function");
+        }
+        // The caller's classes classify the words exactly as the emitter's
+        // argument row does: a float argument takes one XMM slot, every other
+        // word the next GPR slot. Words past the row are the overflow area,
+        // in argument order, which is the order the caller pushes them.
+        std::vector<IRType> wordClasses = classes;
+        wordClasses.resize(args.size(), IRType::Void);
+        uint64_t gpWords = 0;
+        uint64_t sseWords = 0;
+        for (IRType cls : wordClasses) {
+            if (cls == IRType::F32 || cls == IRType::F64) {
+                ++sseWords;
+            } else {
+                ++gpWords;
+            }
+        }
+        if (sseWords > kSysVSseRegs) {
+            return refuse(fn.loc, "more than eight float arguments");
+        }
+        const uint64_t overflowWords =
+            gpWords > kSysVIntRegs ? gpWords - kSysVIntRegs : 0;
+        // A SysV variadic activation reserves the register-save area and the
+        // overflow words beside its frame, so `va_start` can name both and a
+        // nested call allocates past them instead of over them.
+        const uint64_t saveBytes = variadic ? kSysVVarargsSaveBytes : 0;
+        const uint64_t overflowBytes =
+            variadic ? overflowWords * layout::kSizePointer : kZeroCell;
         uint32_t top = topId(fn);
         uint64_t bytes = frameWords(top) * layout::kSizePointer;
-        if (bytes > kMemoryCap || memory.size() + bytes > kMemoryCap) {
+        uint64_t used = memory.size();
+        if (bytes > kMemoryCap || used + bytes > kMemoryCap ||
+            saveBytes > kMemoryCap - used - bytes ||
+            overflowBytes > kMemoryCap - used - bytes - saveBytes) {
             return refuse(fn.loc, "vm memory exhausted");
         }
         Frame frame;
         frame.base = static_cast<int64_t>(memory.size());
-        memory.resize(memory.size() + static_cast<size_t>(bytes), kZeroCell);
+        memory.resize(memory.size() + static_cast<size_t>(bytes + saveBytes +
+                                                         overflowBytes),
+                      kZeroCell);
+        if (variadic) {
+            frame.varargsSave =
+                frame.base + static_cast<int64_t>(bytes);
+            frame.varargsOverflow =
+                frame.varargsSave + static_cast<int64_t>(saveBytes);
+            uint64_t gpr = 0;
+            uint64_t sse = 0;
+            uint64_t spilled = 0;
+            for (uint64_t i = kZeroCell; i < static_cast<uint64_t>(args.size());
+                 ++i) {
+                int64_t at = 0;
+                if (wordClasses[i] == IRType::F32 ||
+                    wordClasses[i] == IRType::F64) {
+                    at = frame.varargsSave + kSysVVarargsFpBase +
+                         static_cast<int64_t>(sse) * kSysVVarargsXmmSlot;
+                    ++sse;
+                } else if (gpr < kSysVIntRegs) {
+                    at = frame.varargsSave + kSysVVarargsGpBase +
+                         static_cast<int64_t>(gpr) * layout::kSizePointer;
+                    ++gpr;
+                } else {
+                    at = frame.varargsOverflow +
+                         static_cast<int64_t>(spilled) * layout::kSizePointer;
+                    ++spilled;
+                }
+                if (!storeBytes(at, layout::kSizePointer,
+                                static_cast<uint64_t>(args[i]), fn.loc)) {
+                    return false;
+                }
+            }
+        }
         // The emitter's prologue moves each argument word into its own slot,
         // where a load through the slot's id reads it back: the parameter's
         // value lives in the cell, not in a value register.
@@ -1811,6 +1920,139 @@ struct Runner {
         return true;
     }
 
+    // VARIADICS.md §6/§8: initialize a cursor from the enclosing variadic
+    // function's saved state. The four SysV `__va_list_tag` fields sit at the
+    // operand address — gp_offset, fp_offset, the overflow cursor and the
+    // register-save base — using the same named counts the native prologue
+    // reads. The counts include a hidden sret word because lowering already
+    // added it, so the two targets step over the same slots.
+    bool vaStart(const Instr& instr) {
+        if (instr.operands.empty()) {
+            return refuse(instr.loc, "a bad va_start");
+        }
+        if (frames.back().varargsSave == 0) {
+            return refuse(instr.loc, "va_start needs a SysV variadic function");
+        }
+        const int64_t ap = read(instr.operands[0]);
+        const uint64_t gpOffset =
+            instr.vaNamedGp * layout::kSizePointer;
+        const uint64_t fpOffset =
+            kSysVVarargsFpBase + instr.vaNamedSse * kSysVVarargsXmmSlot;
+        const uint64_t gpStack = instr.vaNamedGp > kSysVIntRegs
+                                     ? instr.vaNamedGp - kSysVIntRegs
+                                     : 0;
+        const uint64_t sseStack = instr.vaNamedSse > kSysVSseRegs
+                                      ? instr.vaNamedSse - kSysVSseRegs
+                                      : 0;
+        const int64_t overflow =
+            frames.back().varargsOverflow +
+            static_cast<int64_t>((gpStack + sseStack) * layout::kSizePointer);
+        if (!storeBytes(ap + static_cast<int64_t>(kSysVVarargsGpField),
+                        kFourBytes, gpOffset, instr.loc) ||
+            !storeBytes(ap + static_cast<int64_t>(kSysVVarargsFpField),
+                        kFourBytes, fpOffset, instr.loc) ||
+            !storeBytes(ap + static_cast<int64_t>(kSysVVarargsOverflowField),
+                        layout::kSizePointer,
+                        static_cast<uint64_t>(overflow), instr.loc) ||
+            !storeBytes(ap + static_cast<int64_t>(kSysVVarargsSaveField),
+                        layout::kSizePointer,
+                        static_cast<uint64_t>(frames.back().varargsSave),
+                        instr.loc)) {
+            return false;
+        }
+        return true;
+    }
+
+    // VARIADICS.md §6/§8: read one value out of the cursor, then advance it.
+    // Integer and pointer arguments consume the next 8-byte GPR save slot
+    // while gp_offset < 48; a float consumes the next 16-byte XMM slot while
+    // fp_offset < 176. Past either row the value comes from the overflow area
+    // and its pointer advances by one word, exactly as the emitter does. The
+    // result is written at the instruction's own width and type, so a narrow
+    // integer extends through its signedness the way a load does.
+    bool vaArg(const Instr& instr) {
+        if (instr.operands.empty() || instr.results.empty()) {
+            return refuse(instr.loc, "a bad va_arg");
+        }
+        const int64_t ap = read(instr.operands[0]);
+        const bool floating =
+            instr.width == IRType::F32 || instr.width == IRType::F64;
+        const uint64_t slotBytes =
+            instr.width == IRType::F32 ? kFloat32Bytes : layout::kSizePointer;
+        auto readAt = [&](int64_t address, uint64_t count, uint64_t& bits) {
+            bool read = false;
+            bits = loadBytes(address, count, instr.loc, read);
+            if (read) {
+                return true;
+            }
+            if (faulted != 0) {
+                return die(faulted);
+            }
+            return refuse(instr.loc, "vm address out of range");
+        };
+        const int64_t fieldAt =
+            ap + static_cast<int64_t>(floating ? kSysVVarargsFpField
+                                               : kSysVVarargsGpField);
+        uint64_t cursor = kZeroCell;
+        if (!readAt(fieldAt, kFourBytes, cursor)) {
+            return false;
+        }
+        const uint64_t limit =
+            floating ? kSysVVarargsFpLimit : kSysVVarargsGpLimit;
+        uint64_t bits = 0;
+        if (cursor < limit) {
+            uint64_t regSave = 0;
+            if (!readAt(ap + static_cast<int64_t>(kSysVVarargsSaveField),
+                        layout::kSizePointer, regSave)) {
+                return false;
+            }
+            if (!readAt(static_cast<int64_t>(regSave + cursor), slotBytes,
+                        bits)) {
+                return false;
+            }
+            const uint64_t step =
+                floating ? kSysVVarargsXmmSlot : layout::kSizePointer;
+            if (!storeBytes(fieldAt, kFourBytes, cursor + step, instr.loc)) {
+                return false;
+            }
+        } else {
+            uint64_t overflow = 0;
+            if (!readAt(ap + static_cast<int64_t>(kSysVVarargsOverflowField),
+                        layout::kSizePointer, overflow)) {
+                return false;
+            }
+            if (!readAt(static_cast<int64_t>(overflow), slotBytes, bits)) {
+                return false;
+            }
+            if (!storeBytes(ap + static_cast<int64_t>(kSysVVarargsOverflowField),
+                            layout::kSizePointer,
+                            overflow + layout::kSizePointer, instr.loc)) {
+                return false;
+            }
+        }
+        if (floating) {
+            // The slot holds the float's own bit pattern, and the result is
+            // the same word a later float operation reads.
+            write(instr.results[0], static_cast<int64_t>(bits));
+            return true;
+        }
+        const uint64_t count = widthBytes(instr.width);
+        if (count == 0) {
+            return refuse(instr.loc, "va_arg needs a value width");
+        }
+        bool isSigned = false;
+        if (!instr.type.isError() && instr.type.type->kind() == Kind::Basic &&
+            instr.type.type->basic().has_value()) {
+            isSigned = basicIsSigned(*instr.type.type->basic());
+        }
+        if (instr.width == IRType::I32 || isSigned) {
+            write(instr.results[0], signExtend(bits, count));
+        } else {
+            write(instr.results[0], static_cast<int64_t>(bits));
+        }
+        return true;
+    }
+
     bool step(const Instr& instr) {
         switch (instr.op) {
             case Op::Const:
@@ -1908,6 +2150,10 @@ struct Runner {
                 }
                 return true;
             }
+            case Op::VaStart:
+                return vaStart(instr);
+            case Op::VaArg:
+                return vaArg(instr);
             case Op::FAdd:
             case Op::FSub:
             case Op::FMul:
@@ -1915,8 +2161,6 @@ struct Runner {
             case Op::FRem:
             case Op::Extract:
             case Op::Insert:
-            case Op::VaStart:
-            case Op::VaArg:
                 return refuse(instr.loc,
                               std::string("vm cannot run ") + opName(instr.op) + " yet");
             case Op::Asm:
@@ -2072,8 +2316,9 @@ static VmResult runProgram(const ir::Module& module,
     // A program that wants arguments reads them itself (initial stack, a
     // firmware table, or an explicit library).
     std::vector<int64_t> entryArgs;
+    std::vector<IRType> entryClasses;
     std::vector<int64_t> answered;
-    if (!run.runFunction(*fn, entryArgs, answered)) {
+    if (!run.runFunction(*fn, entryArgs, entryClasses, answered)) {
         return run.out;
     }
     if (run.programDone) {
