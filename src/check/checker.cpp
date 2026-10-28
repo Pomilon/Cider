@@ -753,14 +753,21 @@ void Checker::walkMethodInst(DeclId spec, DeclId tmpl, const std::string& method
     TypeRef savedRet = funcReturn_;
     bool wasFunc = inFunc_;
     const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+    // A method is never variadic (VARIADICS.md §2), so its body has no saved
+    // argument state for va_start to read. The walk runs lazily from the use
+    // site; without this guard a variadic caller's context would leak into an
+    // unrelated template method and accept a call the ABI cannot honor.
+    bool wasVariadic = inVariadicFunction_;
     funcReturn_ = TypeRef{ret};
     inFunc_ = true;
+    inVariadicFunction_ = false;
     LowerSink* savedSink = sink_;
     sink_ = nullptr;
     spelling->second->body->accept(*this);
     sink_ = savedSink;
     funcReturn_ = savedRet;
     inFunc_ = wasFunc;
+    inVariadicFunction_ = wasVariadic;
     popScope();
     typeScope_ = savedScope;
     active_ = savedActive;

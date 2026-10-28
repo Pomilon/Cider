@@ -3399,6 +3399,26 @@ void testVaStartGenericContext() {
         varargsLoader());
     check(variadicGeneric.ok,
           "a variadic generic body has va_start context: " + variadicGeneric.stage);
+    // A method can never be variadic (VARIADICS.md §2), so a generic method
+    // body first instantiated from a variadic caller must not inherit that
+    // caller's context: methods have no saved argument state to initialize.
+    Checked methodFromVariadic = check(
+        "from std.varargs import VaList, va_start;\n"
+        "struct Box<T> {\n"
+        "  var v: T;\n"
+        "  func peek() -> T {\n"
+        "    var ap: VaList = uninit; va_start(&ap); return (*self).v;\n"
+        "  }\n"
+        "}\n"
+        "func f(n: int, ...) -> int {\n"
+        "  var b: Box<int> = Box<int> { v: n };\n"
+        "  return b.peek();\n"
+        "}\n",
+        varargsLoader());
+    check(!methodFromVariadic.ok &&
+              hasDiagnostic(methodFromVariadic,
+                            "only valid in a variadic function"),
+          "a generic method does not inherit the caller's variadic context");
 }
 
 // A variadic signature keeps its `...` through function-pointer assignment:
