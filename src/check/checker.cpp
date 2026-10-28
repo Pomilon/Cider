@@ -5018,21 +5018,23 @@ TypeRef Checker::checkCall(Call& expr) {
         fail(expr.pos, "not callable");
         return errorRef();
     }
-    if (calleeDecl != nullptr &&
-        calleeDecl->intrinsic != resolve::Intrinsic::None) {
-        intrinsicCalls_[&expr] = calleeDecl->intrinsic;
-        // VARIADICS.md §5: va_start initializes the list from the enclosing
-        // function's saved argument state. Outside a variadic body there is
-        // no such state, while the other entries only need an initialized
-        // *VaList and so work in any function.
-        if (calleeDecl->intrinsic == resolve::Intrinsic::VaStart &&
-            !inVariadicFunction_) {
-            fail(expr.pos, "va_start is only valid in a variadic function");
-            return errorRef();
-        }
+    const resolve::Intrinsic intrinsic =
+        calleeDecl != nullptr ? calleeDecl->intrinsic : resolve::Intrinsic::None;
+    // VARIADICS.md §5: va_start initializes the list from the enclosing
+    // function's saved argument state. Outside a variadic body there is no
+    // such state, while the other entries only need an initialized *VaList
+    // and so work in any function.
+    if (intrinsic == resolve::Intrinsic::VaStart && !inVariadicFunction_) {
+        fail(expr.pos, "va_start is only valid in a variadic function");
+        return errorRef();
     }
     if (!checkCallArguments(expr, sig, false)) {
         return errorRef();
+    }
+    // Recorded only once the call checked: lowering never meets a rejected
+    // call, and a failed one must not claim an intrinsic form.
+    if (intrinsic != resolve::Intrinsic::None) {
+        intrinsicCalls_[&expr] = intrinsic;
     }
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
     return TypeRef{ret};
@@ -5188,16 +5190,22 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
         }
         TypeRef savedRet = funcReturn_;
         bool wasFunc = inFunc_;
+        // The template's own `...` decides va_start's context, never the
+        // caller's: a body is walked lazily from the call site, so the
+        // caller's flag would otherwise leak into an unrelated template.
+        bool wasVariadic = inVariadicFunction_;
         const Type* ret =
             sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
         funcReturn_ = TypeRef{ret};
         inFunc_ = true;
+        inVariadicFunction_ = spelling->variadic;
         LowerSink* savedSink = sink_;
         sink_ = nullptr;
         spelling->body->accept(*this);
         sink_ = savedSink;
         funcReturn_ = savedRet;
         inFunc_ = wasFunc;
+        inVariadicFunction_ = wasVariadic;
         popScope();
         typeScope_ = savedScope;
         moduleScope_ = savedModuleScope;
@@ -5258,15 +5266,20 @@ void Checker::walkSpecForEmit(DeclId spec) {
     }
     TypeRef savedRet = funcReturn_;
     bool wasFunc = inFunc_;
+    // The emission walk re-checks the same body, so it restores the same
+    // template context the checking walk proved (VARIADICS.md §5).
+    bool wasVariadic = inVariadicFunction_;
     const Type* ret =
         sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
     funcReturn_ = TypeRef{ret};
     inFunc_ = true;
+    inVariadicFunction_ = spelling->variadic;
     if (sink_ != nullptr) {
         sink_->onSpecFunc(spec, *spelling, *sig);
     }
     funcReturn_ = savedRet;
     inFunc_ = wasFunc;
+    inVariadicFunction_ = wasVariadic;
     popScope();
     typeScope_ = savedScope;
     moduleScope_ = savedModuleScope;

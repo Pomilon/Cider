@@ -3336,6 +3336,69 @@ void testVaStartContext() {
         "func next(ap: *VaList) -> i32 { return va_arg_i32(ap); }\n",
         varargsLoader());
     check(helper.ok, "va_arg works in a non-variadic helper");
+    // Only the std.varargs spelling is canonical: a user function of the
+    // same name stays an ordinary function with no context rule.
+    Checked userDefined = check(
+        "func va_start(ap: *int) -> void { }\n"
+        "func f() -> void { var x: int = 0; va_start(&x); }\n");
+    check(userDefined.ok,
+          "a user function called va_start is ordinary: " + userDefined.stage);
+    // The module-qualified path resolves the same defining declaration, so
+    // the tag and the context rule follow it.
+    Checked qualified = check(
+        "import std.varargs;\n"
+        "from std.varargs import VaList;\n"
+        "func f(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit;\n"
+        "  varargs.va_start(&ap); varargs.va_end(&ap); return n;\n"
+        "}\n",
+        varargsLoader());
+    check(qualified.ok, "module-qualified va_start works: " + qualified.stage);
+    Checked qualifiedOutside = check(
+        "import std.varargs;\n"
+        "from std.varargs import VaList;\n"
+        "func f() -> void { var ap: VaList = uninit; varargs.va_start(&ap); }\n",
+        varargsLoader());
+    check(!qualifiedOutside.ok &&
+              hasDiagnostic(qualifiedOutside, "only valid in a variadic function"),
+          "module-qualified va_start outside a variadic function is rejected");
+    // va_copy and va_end only manipulate an initialized list, so a plain
+    // helper may use them without a variadic caller.
+    Checked copyHelper = check(
+        "from std.varargs import VaList, va_copy, va_end;\n"
+        "func clone(dst: *VaList, src: *VaList) -> void {\n"
+        "  va_copy(dst, src); va_end(src);\n"
+        "}\n",
+        varargsLoader());
+    check(copyHelper.ok,
+          "va_copy and va_end work in a non-variadic helper: " + copyHelper.stage);
+}
+
+// Generic bodies are checked lazily at the call site, so the caller's
+// variadic context must not leak into the template walk: the template's own
+// `...` decides (VARIADICS.md §5).
+void testVaStartGenericContext() {
+    std::printf("va_start context across generic instantiations\n");
+    Checked helperFromVariadic = check(
+        "from std.varargs import VaList, va_start;\n"
+        "func h<T>(x: T) -> T {\n"
+        "  var ap: VaList = uninit; va_start(&ap); return x;\n"
+        "}\n"
+        "func f(n: int, ...) -> int { return h::<int>(n); }\n",
+        varargsLoader());
+    check(!helperFromVariadic.ok &&
+              hasDiagnostic(helperFromVariadic,
+                            "only valid in a variadic function"),
+          "a generic helper does not inherit the caller's variadic context");
+    Checked variadicGeneric = check(
+        "from std.varargs import VaList, va_start, va_end;\n"
+        "func g<T>(x: T, ...) -> T {\n"
+        "  var ap: VaList = uninit; va_start(&ap); va_end(&ap); return x;\n"
+        "}\n"
+        "func user() -> int { return g::<int>(7, 1); }\n",
+        varargsLoader());
+    check(variadicGeneric.ok,
+          "a variadic generic body has va_start context: " + variadicGeneric.stage);
 }
 
 // A variadic signature keeps its `...` through function-pointer assignment:
@@ -3448,6 +3511,7 @@ int main() {
     testVariadicBodySignature();
     testVaListByValue();
     testVaStartContext();
+    testVaStartGenericContext();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
