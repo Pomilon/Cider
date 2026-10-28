@@ -79,6 +79,23 @@ constexpr uint64_t kMsabiSseRegs = 4;
 constexpr uint64_t kShadowBytes = 32;
 constexpr uint64_t kWordBytes = 8;
 
+// VARIADICS.md §6: a SysV variadic callee keeps the incoming argument
+// registers in a 176-byte area. Six GPR slots sit at offsets 0..40, then two
+// padding words, and eight 16-byte XMM slots at offsets 48..160. The slot
+// counts and the XMM slot extent are named, so the save layout has one writer
+// and `va_start`/`va_arg` read the same numbers the prologue wrote.
+constexpr uint64_t kSysVVarargsGpBase = 0;
+constexpr uint64_t kSysVVarargsFpBase = kSysVIntRegs * kWordBytes;
+constexpr uint64_t kSysVVarargsGpLimit =
+    kSysVVarargsGpBase + kSysVIntRegs * kWordBytes;
+constexpr uint64_t kSysVVarargsXmmSlot = 16;
+constexpr uint64_t kSysVVarargsFpLimit =
+    kSysVVarargsFpBase + kSysVSseRegs * kSysVVarargsXmmSlot;
+constexpr uint64_t kSysVVarargsSaveBytes =
+    kSysVVarargsFpBase + kSysVSseRegs * kSysVVarargsXmmSlot;
+constexpr uint64_t kSysVVarargsSaveCells =
+    kSysVVarargsSaveBytes / kWordBytes;
+
 bool calleeArg(std::string&, std::string&, const ir::Instr&) = delete;  // placeholder
 
 // True when a global's image is entirely zero bytes and its exact extent is
@@ -652,6 +669,17 @@ private:
         allocation_ = allocateFunction(fn);
         calleeSaveBase_ = cells;
         cells += static_cast<uint32_t>(allocation_.calleeSaved.size());
+        // 8.4/VARIADICS.md §6: only a SysV variadic function owns a
+        // register-save area. It sits past the value slots, call stage and
+        // callee-save cells, inside the same rounded span, so the frame's
+        // alignment rule does not change.
+        const bool ms = fn.signature.abi() == Abi::MsAbi;
+        varargsSave_ = !ms && fn.signature.variadic();
+        varargsBase_ = 0;
+        if (varargsSave_) {
+            varargsBase_ = cells * static_cast<uint32_t>(kWordBytes);
+            cells += static_cast<uint32_t>(kSysVVarargsSaveCells);
+        }
         uint32_t span = (cells * 8 + 15) & ~15u;
         // A normal SysV callee enters with rsp 8 mod 16 (the caller aligned
         // rsp before its call), so push rbp makes rbp 16-aligned and a
@@ -675,6 +703,26 @@ private:
         out_ += "  push rbp\n";
         out_ += "  mov rbp, rsp\n";
         out_ += "  sub rsp, " + std::to_string(span) + "\n";
+        // VARIADICS.md §6: the callee preserves the incoming argument state
+        // before any user code can clobber it. GPR words go down first, then
+        // the eight XMM registers; movdqu keeps the save correct even when the
+        // frame puts the 16-byte slots at an 8-byte offset.
+        if (varargsSave_) {
+            static const char* const kVarargsGpRegs[kSysVIntRegs] = {
+                "rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+            for (uint64_t i = 0; i < kSysVIntRegs; ++i) {
+                out_ += "  mov qword ptr [rsp + " +
+                        std::to_string(varargsBase_ +
+                                       kSysVVarargsGpBase + i * kWordBytes) +
+                        "], " + kVarargsGpRegs[i] + "\n";
+            }
+            for (uint64_t i = 0; i < kSysVSseRegs; ++i) {
+                out_ += "  movdqu xmmword ptr [rsp + " +
+                        std::to_string(varargsBase_ + kSysVVarargsFpBase +
+                                       i * kSysVVarargsXmmSlot) +
+                        "], xmm" + std::to_string(i) + "\n";
+            }
+        }
         // Callee-saved homes keep their caller's values in frame cells, so the
         // prologue/epilogue pair never moves rsp and the span above already
         // carries their bytes. rbx is the only pool member today.
@@ -696,7 +744,6 @@ private:
         // 8.4: the row follows the function's own convention. An msabi
         // function reads rcx, rdx, r8 and r9, and a word past that row sits
         // above the caller's 32-byte shadow space.
-        const bool ms = fn.signature.abi() == Abi::MsAbi;
         const uint64_t intRegs = ms ? kMsabiIntRegs : kSysVIntRegs;
         const char* (*row)(uint64_t) = ms ? argRegMs : argReg;
         if (ms) {
@@ -776,6 +823,88 @@ private:
         }
         currentHome_ = nullptr;
         return !failed_;
+    }
+
+    // VARIADICS.md §6: `va_start` writes the four SysV cursor fields through
+    // the operand's pointer. The named counts ride on the instruction, so the
+    // target never re-walks the signature: gp_offset steps over every named
+    // integer word (including a hidden sret) and fp_offset over every named
+    // SSE register. The overflow cursor starts past all named stack words —
+    // integer words past the register row first, then any named float that
+    // also had to spill — which is why it is not `max(0, namedGp - 6)` alone.
+    bool emitVaStart(const ir::Instr& instr) {
+        if (!varargsSave_) {
+            refuse(instr.loc, "va_start needs a SysV variadic function");
+            return false;
+        }
+        const uint64_t gpOffset = instr.vaNamedGp * kWordBytes;
+        const uint64_t fpOffset =
+            kSysVVarargsFpBase + instr.vaNamedSse * kSysVVarargsXmmSlot;
+        const uint64_t gpStack =
+            instr.vaNamedGp > kSysVIntRegs ? instr.vaNamedGp - kSysVIntRegs
+                                           : 0;
+        const uint64_t sseStack =
+            instr.vaNamedSse > kSysVSseRegs ? instr.vaNamedSse - kSysVSseRegs
+                                            : 0;
+        const uint64_t overflow =
+            2 * kWordBytes + (gpStack + sseStack) * kWordBytes;
+        out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
+        emitNullCheck("rax");
+        out_ += "  mov dword ptr [rax], " + std::to_string(gpOffset) + "\n";
+        out_ += "  mov dword ptr [rax + 4], " + std::to_string(fpOffset) + "\n";
+        out_ += "  lea rcx, [rbp + " + std::to_string(overflow) + "]\n";
+        out_ += "  mov qword ptr [rax + 8], rcx\n";
+        out_ += "  lea rcx, [rsp + " + std::to_string(varargsBase_) + "]\n";
+        out_ += "  mov qword ptr [rax + 16], rcx\n";
+        return true;
+    }
+
+    // VARIADICS.md §6: one value out of the cursor, then advance it. Integer
+    // and pointer arguments consume the next 8-byte GPR save slot while
+    // gp_offset < 48; an f64 consumes the next 16-byte XMM slot while
+    // fp_offset < 176. Past either row the value comes from the overflow
+    // area and the pointer advances by one word. r11 is fixed scratch here
+    // (VaArg is a barrier), so the read and the advance cannot collide.
+    bool emitVaArg(const ir::Instr& instr) {
+        const bool floating = instr.width == ir::IRType::F64 ||
+                              instr.width == ir::IRType::F32;
+        const std::string base =
+            ".L_cider_va_arg_" + std::to_string(vaArgSeq_++);
+        const std::string done = base + "_done";
+        const std::string stack = base + "_stack";
+        out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
+        emitNullCheck("rax");
+        if (floating) {
+            out_ += "  mov ecx, dword ptr [rax + 4]\n";
+            out_ += "  cmp ecx, " +
+                    std::to_string(kSysVVarargsFpLimit) + "\n";
+        } else {
+            out_ += "  mov ecx, dword ptr [rax]\n";
+            out_ += "  cmp ecx, " +
+                    std::to_string(kSysVVarargsGpLimit) + "\n";
+        }
+        out_ += "  jae " + stack + "\n";
+        out_ += "  mov rdx, qword ptr [rax + 16]\n";
+        out_ += "  add rdx, rcx\n";
+        out_ += "  mov rdx, qword ptr [rdx]\n";
+        if (floating) {
+            out_ += "  add ecx, " +
+                    std::to_string(kSysVVarargsXmmSlot) + "\n";
+            out_ += "  mov dword ptr [rax + 4], ecx\n";
+        } else {
+            out_ += "  add ecx, " + std::to_string(kWordBytes) + "\n";
+            out_ += "  mov dword ptr [rax], ecx\n";
+        }
+        out_ += "  jmp " + done + "\n";
+        out_ += stack + ":\n";
+        out_ += "  mov rdx, qword ptr [rax + 8]\n";
+        out_ += "  mov r11, qword ptr [rdx]\n";
+        out_ += "  add rdx, " + std::to_string(kWordBytes) + "\n";
+        out_ += "  mov qword ptr [rax + 8], rdx\n";
+        out_ += "  mov rdx, r11\n";
+        out_ += done + ":\n";
+        storeResult(instr.results[0].id, "rdx");
+        return true;
     }
 
     bool emitInstr(const ir::Function& fn, const ir::Instr& instr) {
@@ -1215,6 +1344,12 @@ private:
             // load and store already knows where it lives.
             return true;
         }
+        if (instr.op == ir::Op::VaStart) {
+            return emitVaStart(instr);
+        }
+        if (instr.op == ir::Op::VaArg) {
+            return emitVaArg(instr);
+        }
         if (instr.op == ir::Op::Call) {
             // Two register classes, counted separately: integer words take
             // the six integer registers (a string occupies two, so six
@@ -1285,12 +1420,18 @@ private:
             }
             // An indirect callee names a slot, and slot offsets read against
             // rsp: the address is taken before any push or shadow moves rsp.
-            // rax then holds it through the pushes, so it is not also a
-            // staging register below.
-            const uint64_t stageBase = instr.call.indirect ? 1 : 0;
+            // A non-variadic call keeps it in rax through the pushes. A SysV
+            // variadic call must set `al` just before the call, so its target
+            // is staged in r11 instead and rax stays free for the count.
+            const bool setAl = instr.call.variadic && !ms;
+            const bool stageInR11 = instr.call.indirect && setAl;
+            const char* calleeStage = stageInR11 ? "r11" : "rax";
+            const uint64_t stageBase =
+                instr.call.indirect && !stageInR11 ? 1 : 0;
             if (instr.call.indirect) {
-                out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
-                emitNullCheck("rax");
+                out_ += "  mov " + std::string(calleeStage) + ", " +
+                        slot(instr.calleeValue.id) + "\n";
+                emitNullCheck(calleeStage);
             }
             if (stackWords != 0 || stackPad != 0) {
                 // The spill goes down as pushes and nothing else: the
@@ -1312,12 +1453,21 @@ private:
                 static constexpr uint64_t kSpillRegs = 7;
                 static const char* const kSpillReg[kSpillRegs] = {
                     "rax", "r10", "r11", "r12", "r13", "r14", "r15"};
-                if (spilled.size() + stageBase > kSpillRegs) {
+                // A variadic indirect call reserves r11 for the target, so
+                // its spill row skips that slot and rax takes the first word.
+                static constexpr uint64_t kSpillRegsNoR11 = kSpillRegs - 1;
+                static const char* const kSpillRegNoR11[kSpillRegsNoR11] = {
+                    "rax", "r10", "r12", "r13", "r14", "r15"};
+                const char* const* spillRow =
+                    stageInR11 ? kSpillRegNoR11 : kSpillReg;
+                const uint64_t spillCap =
+                    stageInR11 ? kSpillRegsNoR11 : kSpillRegs;
+                if (spilled.size() + stageBase > spillCap) {
                     refuse(instr.loc, "more argument words than the spill stage holds");
                     return false;
                 }
                 for (uint64_t at = 0; at < spilled.size(); ++at) {
-                    out_ += "  mov " + std::string(kSpillReg[at + stageBase]) + ", " +
+                    out_ += "  mov " + std::string(spillRow[at + stageBase]) + ", " +
                             slot(spilled[at]->id) + "\n";
                 }
                 if (stackPad != 0) {
@@ -1326,7 +1476,7 @@ private:
                     out_ += "  push 0\n";
                 }
                 for (uint64_t at = spilled.size(); at > skipNone; --at) {
-                    out_ += "  push " + std::string(kSpillReg[at - 1 + stageBase]) + "\n";
+                    out_ += "  push " + std::string(spillRow[at - 1 + stageBase]) + "\n";
                 }
             }
             // 8.4: the caller owns the callee's 32 bytes of shadow space. It
@@ -1335,8 +1485,15 @@ private:
             if (ms) {
                 out_ += "  sub rsp, " + std::to_string(kShadowBytes) + "\n";
             }
+            // VARIADICS.md §6: a SysV variadic caller states how many vector
+            // registers the call used. Nothing staged for the call depends on
+            // rax any more: a direct call needs no target register, and an
+            // indirect one holds its target in r11.
+            if (setAl) {
+                out_ += "  mov al, " + std::to_string(sse) + "\n";
+            }
             if (instr.call.indirect) {
-                out_ += "  call rax\n";
+                out_ += "  call " + std::string(calleeStage) + "\n";
             } else {
                 out_ += "  call " + asmSafeName(instr.callee) + "\n";
             }
@@ -1948,6 +2105,13 @@ private:
     FunctionAllocation allocation_;
     const BlockAllocation* currentHome_ = nullptr;
     uint32_t calleeSaveBase_ = 0;
+    // The SysV variadic register-save area for the function being emitted:
+    // whether this frame has one, and its byte offset from rsp. The area and
+    // the `va_start` cursor both read these, so they cannot disagree.
+    bool varargsSave_ = false;
+    uint32_t varargsBase_ = 0;
+    // Unique suffix for `va_arg`'s register/overflow paths across the module.
+    uint64_t vaArgSeq_ = 0;
     std::string out_;
     // Unique suffix for u64-to-float conversion labels (int→float casts
     // need a two-path sequence; see emitCast).

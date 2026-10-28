@@ -45,9 +45,40 @@ struct Built {
     std::unique_ptr<cider::ir::Module> module;
 };
 
+// modules/std/varargs.cid, embedded: a unit test runs from any working
+// directory, so the loader carries the public surface instead of reading the
+// tree (VARIADICS.md §5). The file is the authority; the driver probe over
+// CIDER_LIB checks the real one.
+const char* kVarargsSource =
+    "// std.varargs - C variadic argument access.\n"
+    "\n"
+    "export type VaList = va_list;\n"
+    "\n"
+    "extern func va_start(ap: *VaList) -> void;\n"
+    "extern func va_copy(dst: *VaList, src: *VaList) -> void;\n"
+    "extern func va_end(ap: *VaList) -> void;\n"
+    "\n"
+    "extern func va_arg_i32(ap: *VaList) -> i32;\n"
+    "extern func va_arg_i64(ap: *VaList) -> i64;\n"
+    "extern func va_arg_u64(ap: *VaList) -> u64;\n"
+    "extern func va_arg_f64(ap: *VaList) -> f64;\n"
+    "extern func va_arg_ptr(ap: *VaList) -> *void;\n";
+
+cider::resolve::Resolver::ModuleLoader varargsLoader() {
+    return [](const std::string& name) -> std::unique_ptr<cider::Program> {
+        if (name != "std.varargs") {
+            return nullptr;
+        }
+        cider::Lexer lexer("varargs.cid", kVarargsSource);
+        cider::Parser parser("varargs.cid", lexer.lex());
+        return parser.parse();
+    };
+}
+
 Built buildAs(const std::string& text, cider::target::Kind target,
               bool checks = false, bool allocationFixture = true,
-              bool entryFixture = true) {
+              bool entryFixture = true,
+              cider::resolve::Resolver::ModuleLoader loader = nullptr) {
     Built out;
     out.types = std::make_unique<cider::TypeContext>();
     std::string source =
@@ -67,7 +98,7 @@ Built buildAs(const std::string& text, cider::target::Kind target,
         out.stage = "parse";
         return out;
     }
-    auto resolver = std::make_unique<cider::resolve::Resolver>(*out.types, nullptr, target);
+    auto resolver = std::make_unique<cider::resolve::Resolver>(*out.types, loader, target);
     if (!resolver->resolveProgram(*program, "main")) {
         out.stage = "resolve";
         return out;
@@ -108,8 +139,10 @@ Built buildAs(const std::string& text, cider::target::Kind target,
     return out;
 }
 
-Built build(const std::string& text, bool checks = false) {
-    return buildAs(text, cider::target::Kind::Native, checks);
+Built build(const std::string& text, bool checks = false,
+            cider::resolve::Resolver::ModuleLoader loader = nullptr) {
+    return buildAs(text, cider::target::Kind::Native, checks, true, true,
+                   std::move(loader));
 }
 
 // Assembles, links and runs one emitted text, capturing stderr. -1 when the
@@ -176,9 +209,10 @@ int runAsmCapture(const std::string& asmText, bool& signaled, std::string& err) 
 
 // Assembles, links and runs the text, answering its exit code. -1 when the
 // program did not exit normally.
-int runCode(const std::string& text, bool& signaled, bool checks = false) {
+int runCode(const std::string& text, bool& signaled, bool checks = false,
+            cider::resolve::Resolver::ModuleLoader loader = nullptr) {
     signaled = false;
-    Built built = build(text, checks);
+    Built built = build(text, checks, std::move(loader));
     if (!built.ok) {
         return -1;
     }
@@ -3405,6 +3439,89 @@ void testArrowOperatorNative() {
           "a store through a smart pointer arrow answers 3");
 }
 
+void testVariadicSysVAssembly() {
+    std::printf("sysv variadic assembly\n");
+    Built out = buildAs(
+        "from std.varargs import VaList, va_start, va_arg_i32;\n"
+        "func f(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap); return va_arg_i32(&ap);\n"
+        "}\n"
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func main() -> int { return sink(\"x\", 1); }\n",
+        cider::target::Kind::Native, false, true, true, varargsLoader());
+    check(out.ok, "variadic SysV module emits: " + out.stage);
+    check(out.asmText.find("mov qword ptr [rsp +") != std::string::npos,
+          "the callee saves GPRs");
+    check(out.asmText.find("movdqu") != std::string::npos,
+          "the callee saves XMMs");
+    check(out.asmText.find("mov al,") != std::string::npos,
+          "a variadic call sets al");
+
+    // The overflow area starts after every named stack word, not just after
+    // the named GP overflow: seven integer words put one word on the stack
+    // (rbp+16), and the named f64 stays in an SSE register, so the first
+    // variadic argument begins at rbp+24.
+    Built mixed = buildAs(
+        "from std.varargs import VaList, va_start, va_arg_i32;\n"
+        "func f(a: int, b: int, c: int, d: int, e: int, g: int, h: int,\n"
+        "       x: f64, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap); return va_arg_i32(&ap);\n"
+        "}\n"
+        "func main() -> int { return f(1, 2, 3, 4, 5, 6, 7, 1.0, 8); }\n",
+        cider::target::Kind::Native, false, true, true, varargsLoader());
+    check(mixed.ok, "a mixed named-parameter variadic function emits: " +
+                        mixed.stage);
+    check(mixed.asmText.find("lea rcx, [rbp + 24]") != std::string::npos,
+          "the overflow area follows every named stack word");
+
+    // An indirect variadic call stages the target where `mov al` cannot
+    // corrupt it.
+    Built indirect = buildAs(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func main() -> int {\n"
+        "  var p: *func(*char, ...) -> int = &sink;\n"
+        "  return p(\"x\", 1);\n"
+        "}\n",
+        cider::target::Kind::Native, false, true, true, varargsLoader());
+    check(indirect.ok, "an indirect variadic call emits: " + indirect.stage);
+    check(indirect.asmText.find("call r11") != std::string::npos,
+          "an indirect variadic call stages its callee in r11");
+}
+
+void testVariadicSysVExecution() {
+    std::printf("sysv variadic execution\n");
+    bool signaled = false;
+    // One named word leaves five GP slots: arg 6 travels on the stack, so the
+    // run covers both the register-save area and the overflow area.
+    int code = runCode(
+        "from std.varargs import VaList, va_start, va_arg_i32;\n"
+        "func sum(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap);\n"
+        "  var total: int = n;\n"
+        "  var i: int = 0;\n"
+        "  while (i < 6) { total = total + va_arg_i32(&ap); i = i + 1; }\n"
+        "  return total;\n"
+        "}\n"
+        "func main() -> int { return sum(1, 2, 3, 4, 5, 6, 7) + 14; }\n",
+        signaled, false, varargsLoader());
+    check(!signaled && code == 42,
+          "varargs reach a Cider callee from registers and the stack");
+
+    // A named f64 consumes an SSE slot, so the variadic double arrives in the
+    // next XMM save slot (fp_offset = 48 + 16).
+    code = runCode(
+        "from std.varargs import VaList, va_start, va_arg_f64;\n"
+        "func pick(a: int, b: f64, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap);\n"
+        "  var d: f64 = va_arg_f64(&ap);\n"
+        "  return a + (d as int);\n"
+        "}\n"
+        "func main() -> int { return pick(2, 1.0, 40.0); }\n",
+        signaled, false, varargsLoader());
+    check(!signaled && code == 42,
+          "a variadic f64 follows a named f64 in the SSE save area");
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -3474,6 +3591,8 @@ int main() {
     testOperatorIndexAssignmentNative();
     testStructDeleteNative();
     testArrowOperatorNative();
+    testVariadicSysVAssembly();
+    testVariadicSysVExecution();
     testTrap();
     testRemovedPrelude();
     testElementAddr();
