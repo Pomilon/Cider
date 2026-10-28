@@ -5215,7 +5215,9 @@ TypeRef Checker::checkField(Field& expr) {
             }
             const Signature* sig = resolver_.methodSig(*id, "operator_arrow");
             if (sig == nullptr) {
-                fail(expr.pos, "no matching operator '->'");
+                fail(expr.pos,
+                     "operator '->' needs a pointer; this value has no "
+                     "'operator->' (use '.' for a value)");
                 return errorRef();
             }
             if (!methodVisible(*id, "operator_arrow", expr.pos)) {
@@ -5235,7 +5237,8 @@ TypeRef Checker::checkField(Field& expr) {
             operatorArrows_[&expr] = pointee;
             return checkFieldType(pointee, expr);
         }
-        fail(expr.pos, "operator '->' needs a pointer or a class/struct");
+        fail(expr.pos,
+             "operator '->' needs a pointer or a type with 'operator->'");
         return errorRef();
     }
     // `da.aval`: the qualifier names a module, so the member resolves in
@@ -5422,7 +5425,9 @@ TypeRef Checker::checkField(Field& expr) {
 TypeRef Checker::checkFieldType(TypeRef object, Field& expr) {
     Kind kind = object.type->kind();
     if (kind == Kind::Pointer) {
-        fail(expr.pos, "deref first: a pointer has no fields");
+        fail(expr.pos,
+             "a pointer has no fields; use '->' or dereference first: "
+             "'p->field' or '(*p).field' (note '*p.field' means '*(p.field)')");
         return errorRef();
     }
     if (kind == Kind::Class) {

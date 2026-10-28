@@ -39,6 +39,18 @@ struct Checked {
     std::unique_ptr<cider::check::Checker> checker;
 };
 
+bool hasDiagnostic(const Checked& checked, const std::string& needle) {
+    if (checked.checker == nullptr) {
+        return false;
+    }
+    for (const cider::check::CheckError& error : checked.checker->errors()) {
+        if (error.message.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Checked checkAs(const std::string& text, cider::target::Kind target,
                 cider::resolve::Resolver::ModuleLoader load = nullptr,
                 bool allocationFixture = true) {
@@ -2560,6 +2572,9 @@ void testArrowMember() {
     check(arrow.ok, "p->x checks like (*p).x: " + arrow.stage);
     Checked dot = check("struct S { var x: int; } func f(p: *S) -> int { return p.x; } func main() -> int { return 0; }");
     check(!dot.ok && dot.stage == "check", "p.x on a pointer stays rejected");
+    check(hasDiagnostic(dot, "a pointer has no fields") &&
+              hasDiagnostic(dot, "'(*p).field'"),
+          "p.x points at '->' and dereference-first spellings");
 }
 
 void testFloatGlobal() {
@@ -3052,6 +3067,19 @@ void testArrowOperator() {
         "}\n");
     check(!missing.ok && missing.stage == "check",
           "a struct arrow needs operator->");
+    check(hasDiagnostic(missing, "has no 'operator->'") &&
+              hasDiagnostic(missing, "use '.' for a value"),
+          "a value arrow explains the missing operator and suggests '.'");
+
+    Checked scalar = check(
+        "func main() -> int {\n"
+        "    var n: int = 7;\n"
+        "    return n->x;\n"
+        "}\n");
+    check(!scalar.ok && scalar.stage == "check",
+          "a scalar arrow stays rejected");
+    check(hasDiagnostic(scalar, "needs a pointer or a type with 'operator->'"),
+          "a scalar arrow names pointers and operator->");
 
     Checked badReturn = check(
         "class P { func operator->() -> int { return 1; } }\n");
