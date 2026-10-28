@@ -373,6 +373,18 @@ add_test(NAME v4_register_allocation
 set_tests_properties(v4_register_allocation PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Task 10's native C interop proof for C variadics: a Cider caller calls
+# gcc-compiled integer, pointer and f64 variadic helpers (directly and through
+# a function pointer), a gcc caller calls Cider-defined variadics using
+# va_copy and va_end, and the UEFI msabi fixture carries the shadow-space
+# homes and duplicated float. gcc, clang or ld -m i386pep missing is SKIP.
+add_test(NAME v4_varargs
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/varargs_test.py)
+set_tests_properties(v4_varargs PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  SKIP_RETURN_CODE 77)
+
 # Task 4's second optimizer slice: small direct callees are cloned before
 # mem2reg, so parameter slots and return joins promote. Native and both VM legs
 # pin parameters, side-effect order, two returns, multiword and sret answers,
