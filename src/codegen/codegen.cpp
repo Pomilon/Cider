@@ -79,6 +79,13 @@ constexpr uint64_t kMsabiSseRegs = 4;
 constexpr uint64_t kShadowBytes = 32;
 constexpr uint64_t kWordBytes = 8;
 
+// VARIADICS.md §7: an msabi callee's four integer homes sit in the caller's
+// 32-byte shadow space at [rbp + 16 .. rbp + 40], and the first stack word is
+// just above it at [rbp + 48]. Both the variadic prologue and the va_arg
+// cursor read these offsets, so they are named once.
+constexpr uint64_t kMsHomeBase = 2 * kWordBytes;
+constexpr uint64_t kMsStackBase = kMsHomeBase + kShadowBytes;
+
 // VARIADICS.md §6: a SysV variadic callee keeps the incoming argument
 // registers in a 176-byte area. Six GPR slots sit at offsets 0..40, then two
 // padding words, and eight 16-byte XMM slots at offsets 48..160. The slot
@@ -675,6 +682,7 @@ private:
         // alignment rule does not change.
         const bool ms = fn.signature.abi() == Abi::MsAbi;
         varargsSave_ = !ms && fn.signature.variadic();
+        msVarargs_ = ms && fn.signature.variadic();
         varargsBase_ = 0;
         if (varargsSave_) {
             varargsBase_ = cells * static_cast<uint32_t>(kWordBytes);
@@ -723,6 +731,19 @@ private:
                         "], xmm" + std::to_string(i) + "\n";
             }
         }
+        // VARIADICS.md §7: the Microsoft x64 callee homes the four integer
+        // argument registers in the caller's shadow space before user code
+        // can clobber them. A variadic float's bits are already in the GPR
+        // duplicate at the same positional slot, so no XMM home is needed.
+        if (msVarargs_) {
+            static const char* const kMsHomeRegs[kMsabiIntRegs] = {
+                "rcx", "rdx", "r8", "r9"};
+            for (uint64_t i = 0; i < kMsabiIntRegs; ++i) {
+                out_ += "  mov qword ptr [rbp + " +
+                        std::to_string(kMsHomeBase + i * kWordBytes) + "], " +
+                        kMsHomeRegs[i] + "\n";
+            }
+        }
         // Callee-saved homes keep their caller's values in frame cells, so the
         // prologue/epilogue pair never moves rsp and the span above already
         // carries their bytes. rbx is the only pool member today.
@@ -735,54 +756,77 @@ private:
         }
 
         // Parameters arrive in registers (then stack); they live in slots
-        // from here on, like every other value. A float parameter comes in
-        // on its SSE register — the class lowering recorded per word — so
-        // the two counters mirror the caller's split exactly; an integer
-        // word past the row would arrive on the stack, which the caller
-        // refuses to send, so that branch stays a defensive reading.
+        // from here on, like every other value.
         //
-        // 8.4: the row follows the function's own convention. An msabi
-        // function reads rcx, rdx, r8 and r9, and a word past that row sits
-        // above the caller's 32-byte shadow space.
-        const uint64_t intRegs = ms ? kMsabiIntRegs : kSysVIntRegs;
-        const char* (*row)(uint64_t) = ms ? argRegMs : argReg;
+        // 8.4: an msabi function uses one positional slot per argument word.
+        // Slot i below four reads rcx/rdx/r8/r9 for an integer word and
+        // xmm0..xmm3 for a float word; a later slot reads the caller's stack
+        // at [rbp + 48 + (slot - 4) * 8], above the 32-byte shadow space.
+        // VARIADICS.md §6: SysV keeps its separate integer and SSE counters.
         if (ms) {
-            uint64_t floats = 0;
-            for (uint64_t w = 0; w < static_cast<uint64_t>(fn.params.size()); ++w) {
+            for (uint64_t w = 0; w < static_cast<uint64_t>(fn.params.size());
+                 ++w) {
                 const ir::IRType cls = w < fn.paramClasses.size()
                                            ? fn.paramClasses[w]
                                            : ir::IRType::Void;
                 if (cls == ir::IRType::F32 || cls == ir::IRType::F64) {
-                    ++floats;
+                    const char* move =
+                        cls == ir::IRType::F32 ? "movss" : "movsd";
+                    if (w < kMsabiSseRegs) {
+                        out_ += "  " + std::string(move) + " " +
+                                slot(fn.params[w].id) + ", xmm" +
+                                std::to_string(w) + "\n";
+                    } else {
+                        // A stack home is one eight-byte word; the float's
+                        // bits move through rax so neither operand is memory.
+                        uint64_t stackAt =
+                            kMsStackBase + (w - kMsabiIntRegs) * kWordBytes;
+                        out_ += "  mov rax, [rbp + " +
+                                std::to_string(stackAt) + "]\n";
+                        out_ += "  mov " + slot(fn.params[w].id) + ", rax\n";
+                    }
+                    continue;
+                }
+                if (w < kMsabiIntRegs) {
+                    out_ += "  mov " + slot(fn.params[w].id) + ", " +
+                            argRegMs(w) + "\n";
+                } else {
+                    uint64_t stackAt =
+                        kMsStackBase + (w - kMsabiIntRegs) * kWordBytes;
+                    out_ += "  mov rax, [rbp + " + std::to_string(stackAt) +
+                            "]\n";
+                    out_ += "  mov " + slot(fn.params[w].id) + ", rax\n";
                 }
             }
-            if (floats > kMsabiSseRegs) {
-                refuse(fn.loc, "more than four float parameters in an msabi function");
-                return false;
+        } else {
+            uint64_t gpr = 0;
+            uint64_t sse = 0;
+            for (uint64_t w = 0;
+                 w < static_cast<uint64_t>(fn.params.size()); ++w) {
+                const ir::IRType cls = w < fn.paramClasses.size()
+                                           ? fn.paramClasses[w]
+                                           : ir::IRType::Void;
+                if (cls == ir::IRType::F32 || cls == ir::IRType::F64) {
+                    const char* move =
+                        cls == ir::IRType::F32 ? "movss" : "movsd";
+                    out_ += "  " + std::string(move) + " " +
+                            slot(fn.params[w].id) + ", xmm" +
+                            std::to_string(sse) + "\n";
+                    ++sse;
+                    continue;
+                }
+                if (gpr < kSysVIntRegs) {
+                    out_ += "  mov " + slot(fn.params[w].id) + ", " +
+                            argReg(gpr) + "\n";
+                } else {
+                    uint64_t stackAt =
+                        2 * kWordBytes + (gpr - kSysVIntRegs) * kWordBytes;
+                    out_ += "  mov rax, [rbp + " + std::to_string(stackAt) +
+                            "]\n";
+                    out_ += "  mov " + slot(fn.params[w].id) + ", rax\n";
+                }
+                ++gpr;
             }
-        }
-        uint64_t gpr = 0;
-        uint64_t sse = 0;
-        for (uint64_t w = 0; w < static_cast<uint64_t>(fn.params.size()); ++w) {
-            const ir::IRType cls = w < fn.paramClasses.size()
-                                       ? fn.paramClasses[w]
-                                       : ir::IRType::Void;
-            if (cls == ir::IRType::F32 || cls == ir::IRType::F64) {
-                const char* move = cls == ir::IRType::F32 ? "movss" : "movsd";
-                out_ += "  " + std::string(move) + " " + slot(fn.params[w].id) +
-                        ", xmm" + std::to_string(sse) + "\n";
-                ++sse;
-                continue;
-            }
-            if (gpr < intRegs) {
-                out_ += "  mov " + slot(fn.params[w].id) + ", " + row(gpr) + "\n";
-            } else {
-                uint64_t stackAt = 16 + (ms ? kShadowBytes : 0) +
-                                   (gpr - intRegs) * 8;
-                out_ += "  mov rax, [rbp + " + std::to_string(stackAt) + "]\n";
-                out_ += "  mov " + slot(fn.params[w].id) + ", rax\n";
-            }
-            ++gpr;
         }
 
         slotIds_.clear();
@@ -832,10 +876,29 @@ private:
     // SSE register. The overflow cursor starts past all named stack words —
     // integer words past the register row first, then any named float that
     // also had to spill — which is why it is not `max(0, namedGp - 6)` alone.
+    //
+    // VARIADICS.md §7: the Microsoft list uses only the first of the type's
+    // 24 bytes. That word is a stack cursor at the first variadic home: inside
+    // the four shadow-space slots while a home exists, then the first stack
+    // word above them. The rest of the type is left untouched, so a 24-byte
+    // VaList keeps one target-independent extent.
     bool emitVaStart(const ir::Instr& instr) {
-        if (!varargsSave_) {
-            refuse(instr.loc, "va_start needs a SysV variadic function");
+        if (!varargsSave_ && !msVarargs_) {
+            refuse(instr.loc, "va_start needs a variadic function");
             return false;
+        }
+        if (msVarargs_) {
+            const uint64_t named = static_cast<uint64_t>(instr.vaNamedGp) +
+                                   static_cast<uint64_t>(instr.vaNamedSse);
+            const uint64_t first =
+                named < kMsabiIntRegs
+                    ? kMsHomeBase + named * kWordBytes
+                    : kMsStackBase + (named - kMsabiIntRegs) * kWordBytes;
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
+            emitNullCheck("rax");
+            out_ += "  lea rcx, [rbp + " + std::to_string(first) + "]\n";
+            out_ += "  mov qword ptr [rax], rcx\n";
+            return true;
         }
         const uint64_t gpOffset = instr.vaNamedGp * kWordBytes;
         const uint64_t fpOffset =
@@ -866,6 +929,22 @@ private:
     // area and the pointer advances by one word. r11 is fixed scratch here
     // (VaArg is a barrier), so the read and the advance cannot collide.
     bool emitVaArg(const ir::Instr& instr) {
+        // VARIADICS.md §7: the Microsoft cursor is one stack word. Every
+        // argument home is eight bytes, so an f64 reads the same word an
+        // integer does and reinterprets its bits; the cursor then advances by
+        // one word. r11 is fixed scratch (VaArg is a barrier), and rax holds
+        // the list pointer across the read.
+        if (msVarargs_) {
+            out_ += "  mov rax, " + valueRef(instr.operands[0].id) + "\n";
+            emitNullCheck("rax");
+            out_ += "  mov rdx, qword ptr [rax]\n";
+            out_ += "  mov r11, qword ptr [rdx]\n";
+            out_ += "  add rdx, " + std::to_string(kWordBytes) + "\n";
+            out_ += "  mov qword ptr [rax], rdx\n";
+            out_ += "  mov rdx, r11\n";
+            storeResult(instr.results[0].id, "rdx");
+            return true;
+        }
         const bool floating = instr.width == ir::IRType::F64 ||
                               instr.width == ir::IRType::F32;
         const std::string base =
@@ -1351,71 +1430,122 @@ private:
             return emitVaArg(instr);
         }
         if (instr.op == ir::Op::Call) {
-            // Two register classes, counted separately: integer words take
-            // the six integer registers (a string occupies two, so six
+            // SysV counts its two register classes separately: integer words
+            // take the six integer registers (a string occupies two, so six
             // string arguments would silently share r9 without this count)
-            // and float arguments take an SSE register each, the SysV
-            // split. Both counts refuse before anything is emitted, so a
-            // refusal never leaves half a call staged.
-            uint64_t gpr = 0;
-            uint64_t sse = 0;
-            for (const ir::Argument& arg : instr.arguments) {
-                const bool floatArg = arg.width == ir::IRType::F32 ||
-                                      arg.width == ir::IRType::F64;
-                if (floatArg) {
-                    sse += 1;
-                } else {
-                    gpr += static_cast<uint64_t>(arg.words.size());
-                }
-            }
-            // 8.4: an msabi call takes four integer registers and reserves
-            // 32 bytes of shadow space for the callee; a sysv call takes six
-            // and reserves none.
+            // and float arguments take an SSE register each. Microsoft x64
+            // gives every argument word one positional slot instead: a float
+            // in slot i uses xmm{i} and, for a variadic call, also duplicates
+            // its bits into that slot's GPR home (VARIADICS.md §7). SysV's
+            // counts refuse before anything is emitted, so a refusal never
+            // leaves half a call staged.
             const bool ms = instr.call.msabi;
-            const uint64_t kIntRegs = ms ? kMsabiIntRegs : kSysVIntRegs;
-            const uint64_t kSseRegs = ms ? kMsabiSseRegs : kSysVSseRegs;
-            const char* (*row)(uint64_t) = ms ? argRegMs : argReg;
-            // Integer words past the sixth register spill to the stack the
-            // SysV way: pushed in reverse, argument seven nearest the
-            // return address, with a lone final word padded to sixteen.
-            // Every spilled word stages in a fresh slot first, because a
-            // push moves rsp and a slot offset stands still; the stage is
-            // what the pushes read, under one fixed rsp.
-            const uint64_t stackWords = gpr > kIntRegs ? gpr - kIntRegs : 0;
-            const uint64_t stackPad = stackWords % 2;
-            if (sse > kSseRegs) {
-                refuse(instr.loc, ms ? "more than four float arguments to an msabi call"
-                                     : "more than eight float arguments");
-                return false;
-            }
-            // Integer words flatten in order: a string arrives as (data,
-            // length) in (rdi, rsi), which is the SysV two-eightbyte rule
-            // and exactly what the C struct on the other side declares.
-            // A float argument loads its word into the next SSE register
-            // instead of consuming an integer one.
-            uint64_t index = 0;
-            uint64_t sseIndex = 0;
+            // Every slot past the fourth goes on the stack. The count is
+            // known before staging so the spill pad is fixed.
+            uint64_t stackWords = 0;
+            uint64_t stackPad = 0;
+            // SysV's `al` count: the number of vector registers the call
+            // used. Only the SysV branch fills it.
+            uint64_t vectorRegs = 0;
             std::vector<const ir::Value*> spilled;
-            for (const ir::Argument& arg : instr.arguments) {
-                const bool floatArg = arg.width == ir::IRType::F32 ||
-                                      arg.width == ir::IRType::F64;
-                if (floatArg && arg.words.size() == kFloatWord) {
-                    const char* move =
-                        arg.width == ir::IRType::F32 ? "movss" : "movsd";
-                    out_ += "  " + std::string(move) + " xmm" +
-                            std::to_string(sseIndex) + ", " +
-                            slot(arg.words[0].id) + "\n";
-                    ++sseIndex;
-                    continue;
+            if (ms) {
+                uint64_t slots = 0;
+                for (const ir::Argument& arg : instr.arguments) {
+                    const bool floatArg = arg.width == ir::IRType::F32 ||
+                                          arg.width == ir::IRType::F64;
+                    slots += floatArg && arg.words.size() == kFloatWord
+                                 ? kFloatWord
+                                 : static_cast<uint64_t>(arg.words.size());
                 }
-                for (const ir::Value& word : arg.words) {
-                    if (index < kIntRegs) {
-                        out_ += "  mov " + std::string(row(index)) + ", " +
-                                slot(word.id) + "\n";
-                    } else {
-                        spilled.push_back(&word);
+                stackWords =
+                    slots > kMsabiIntRegs ? slots - kMsabiIntRegs : 0;
+                stackPad = stackWords % 2;
+                uint64_t position = 0;
+                for (const ir::Argument& arg : instr.arguments) {
+                    const bool floatArg = arg.width == ir::IRType::F32 ||
+                                          arg.width == ir::IRType::F64;
+                    if (floatArg && arg.words.size() == kFloatWord) {
+                        const char* move =
+                            arg.width == ir::IRType::F32 ? "movss" : "movsd";
+                        if (position < kMsabiSseRegs) {
+                            out_ += "  " + std::string(move) + " xmm" +
+                                    std::to_string(position) + ", " +
+                                    slot(arg.words[0].id) + "\n";
+                            if (instr.call.variadic) {
+                                // The callee's va_arg reads the eight-byte
+                                // home slot, not the XMM register, so the bit
+                                // pattern must also land in the slot's GPR.
+                                out_ += "  movq " + std::string(argRegMs(position)) +
+                                        ", xmm" + std::to_string(position) + "\n";
+                            }
+                        } else {
+                            spilled.push_back(&arg.words[0]);
+                        }
+                        ++position;
+                        continue;
                     }
-                    ++index;
+                    for (const ir::Value& word : arg.words) {
+                        if (position < kMsabiIntRegs) {
+                            out_ += "  mov " + std::string(argRegMs(position)) +
+                                    ", " + slot(word.id) + "\n";
+                        } else {
+                            spilled.push_back(&word);
+                        }
+                        ++position;
+                    }
+                }
+            } else {
+                uint64_t gpr = 0;
+                uint64_t sse = 0;
+                for (const ir::Argument& arg : instr.arguments) {
+                    const bool floatArg = arg.width == ir::IRType::F32 ||
+                                          arg.width == ir::IRType::F64;
+                    if (floatArg) {
+                        sse += 1;
+                    } else {
+                        gpr += static_cast<uint64_t>(arg.words.size());
+                    }
+                }
+                // Integer words past the sixth register spill to the stack
+                // the SysV way: pushed in reverse, argument seven nearest
+                // the return address, with a lone final word padded to
+                // sixteen.
+                stackWords =
+                    gpr > kSysVIntRegs ? gpr - kSysVIntRegs : 0;
+                stackPad = stackWords % 2;
+                if (sse > kSysVSseRegs) {
+                    refuse(instr.loc, "more than eight float arguments");
+                    return false;
+                }
+                vectorRegs = sse;
+                // Integer words flatten in order: a string arrives as (data,
+                // length) in (rdi, rsi), which is the SysV two-eightbyte rule
+                // and exactly what the C struct on the other side declares.
+                // A float argument loads its word into the next SSE register
+                // instead of consuming an integer one.
+                uint64_t index = 0;
+                uint64_t sseIndex = 0;
+                for (const ir::Argument& arg : instr.arguments) {
+                    const bool floatArg = arg.width == ir::IRType::F32 ||
+                                          arg.width == ir::IRType::F64;
+                    if (floatArg && arg.words.size() == kFloatWord) {
+                        const char* move =
+                            arg.width == ir::IRType::F32 ? "movss" : "movsd";
+                        out_ += "  " + std::string(move) + " xmm" +
+                                std::to_string(sseIndex) + ", " +
+                                slot(arg.words[0].id) + "\n";
+                        ++sseIndex;
+                        continue;
+                    }
+                    for (const ir::Value& word : arg.words) {
+                        if (index < kSysVIntRegs) {
+                            out_ += "  mov " + std::string(argReg(index)) +
+                                    ", " + slot(word.id) + "\n";
+                        } else {
+                            spilled.push_back(&word);
+                        }
+                        ++index;
+                    }
                 }
             }
             // An indirect callee names a slot, and slot offsets read against
@@ -1490,7 +1620,7 @@ private:
             // rax any more: a direct call needs no target register, and an
             // indirect one holds its target in r11.
             if (setAl) {
-                out_ += "  mov al, " + std::to_string(sse) + "\n";
+                out_ += "  mov al, " + std::to_string(vectorRegs) + "\n";
             }
             if (instr.call.indirect) {
                 out_ += "  call " + std::string(calleeStage) + "\n";
@@ -2110,6 +2240,10 @@ private:
     // the `va_start` cursor both read these, so they cannot disagree.
     bool varargsSave_ = false;
     uint32_t varargsBase_ = 0;
+    // VARIADICS.md §7: whether the current function is an msabi variadic
+    // callee. Its cursor lives in the first eight bytes of the 24-byte
+    // VaList, and its incoming integer registers are homed in shadow space.
+    bool msVarargs_ = false;
     // Unique suffix for `va_arg`'s register/overflow paths across the module.
     uint64_t vaArgSeq_ = 0;
     std::string out_;

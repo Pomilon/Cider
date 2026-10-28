@@ -176,6 +176,58 @@ def main():
                     if problem is not None:
                         failures.append("uefi image: " + problem)
 
+        # VARIADICS.md §7: a Cider-defined msabi variadic function is callable
+        # through a variadic function pointer on UEFI, and the assembled shape
+        # carries the shadow-space homes and the duplicated floating slot.
+        varargs_src = source(tmp, "varargs.cid", """\
+from std.varargs import VaList, va_start, va_arg_f64;
+msabi func vsum(n: int, ...) -> f64 {
+    var ap: VaList = uninit;
+    va_start(&ap);
+    return va_arg_f64(&ap);
+}
+msabi func efi_main(image_handle: *void, system_table: *void) -> int {
+    var p: *msabi func(int, ...) -> f64 = &vsum;
+    return p(1, 2.5) as int;
+}
+""")
+        varargs_asm = os.path.join(tmp, "varargs.s")
+        compiled = run([
+            CIDER, "compile", "--target", "uefi", varargs_src,
+            "-o", varargs_asm,
+        ])
+        if compiled.returncode != 0:
+            failures.append("uefi variadic compile: " + describe(compiled))
+        else:
+            text = open(varargs_asm).read()
+            for needle, what in (
+                    ("mov qword ptr [rbp + 16], rcx",
+                     "shadow-space home for rcx"),
+                    ("movq rdx, xmm1",
+                     "the variadic float duplicated into its GPR"),
+                    ("lea rcx, [rbp + 24]",
+                     "the cursor past the one named slot"),
+                    ("call rax",
+                     "the call through the variadic pointer")):
+                if needle not in text:
+                    failures.append(
+                        "uefi variadic assembly lacks %s: %s" % (what, needle))
+            if "mov al," in text:
+                failures.append("uefi variadic call emitted an al count")
+            if shutil.which("clang") is None or not ld_has_i386pep():
+                skipped.append(
+                    "UEFI variadic PE32+ link smoke: "
+                    "clang or ld -m i386pep unavailable")
+            else:
+                efi = os.path.join(tmp, "varargs.efi")
+                linked = run([LINK_UEFI, varargs_asm, "-o", efi])
+                if linked.returncode != 0:
+                    failures.append("uefi variadic link: " + describe(linked))
+                else:
+                    problem = validate_pe32plus(efi)
+                    if problem is not None:
+                        failures.append("uefi variadic image: " + problem)
+
         uefi_main = source(tmp, "uefi_main.cid",
                            "func main() -> int { return 0; }\n")
         expect_failure("missing uefi entry", uefi_main, "efi_main",

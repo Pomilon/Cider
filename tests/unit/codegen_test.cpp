@@ -317,8 +317,9 @@ void testStackArgs() {
           "a float between register args still passes");
 }
 
-// Windows x64 gives each argument class its own register row: the first
-// integer goes to rcx and the first float to xmm0, whatever their order.
+// Windows x64 gives every argument one positional slot: integer words use
+// rcx, rdx, r8, r9 and a float in the same position uses the matching
+// xmm register. Slots past the fourth travel on the stack.
 void testMixedMsabi() {
     std::printf("mixed msabi arguments\n");
     check(runQuiet("msabi func mix(a: int, b: f64, c: int) -> int {\n"
@@ -330,7 +331,7 @@ void testMixedMsabi() {
                    "    return (a as int) + b * 100 + (c as int) * 10 + d;\n"
                    "}\n"
                    "func main() -> int { return alt(1.0, 2, 3.0, 4); }\n") == 235,
-          "a leading float still leaves rcx for the first integer");
+          "a leading float takes slot zero and the integer moves to slot one");
     check(runQuiet("msabi func deep(a: int, b: int, c: int, d: int, e: int,\n"
                    "                 f: f64, g: f64, h: f64, i: f64, j: int) -> int {\n"
                    "    if (a != 1 || b != 2 || c != 3 || d != 4 || e != 5) { return 1; }\n"
@@ -3522,6 +3523,92 @@ void testVariadicSysVExecution() {
           "a variadic f64 follows a named f64 in the SSE save area");
 }
 
+// VARIADICS.md §7: the Microsoft x64 caller gives each argument one
+// positional slot and duplicates a variadic float into that slot's GPR; the
+// callee homes the four integer registers in the shadow space and points the
+// cursor at the first variadic home. The VaList type keeps its 24-byte
+// extent; only its first word is the Microsoft cursor.
+void testVariadicMsAbi() {
+    std::printf("msabi variadic assembly\n");
+    Built out = buildAs(
+        "from std.varargs import VaList, va_start, va_arg_f64;\n"
+        "msabi func sum(n: int, ...) -> f64 {\n"
+        "  var ap: VaList = uninit; va_start(&ap);\n"
+        "  return va_arg_f64(&ap);\n"
+        "}\n"
+        "msabi func call_it() -> f64 { return sum(1, 2.5); }\n"
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "  return call_it() as int;\n"
+        "}\n",
+        cider::target::Kind::Uefi, false, true, true, varargsLoader());
+    check(out.ok, "msabi variadic module emits: " + out.stage);
+    if (out.ok) {
+        check(out.asmText.find("mov qword ptr [rbp + 16], rcx") !=
+                  std::string::npos,
+              "the callee homes rcx in the shadow space");
+        check(out.asmText.find("mov qword ptr [rbp + 24], rdx") !=
+                  std::string::npos,
+              "the callee homes rdx for the first variadic slot");
+        check(out.asmText.find("movsd xmm1,") != std::string::npos,
+              "the float takes xmm1 because the integer owns slot zero");
+        check(out.asmText.find("movq rdx, xmm1") != std::string::npos,
+              "the variadic float is duplicated into its positional GPR");
+        check(out.asmText.find("lea rcx, [rbp + 24]") != std::string::npos,
+              "va_start points the cursor past the one named slot");
+        check(out.asmText.find("mov al,") == std::string::npos,
+              "an msabi variadic call sets no al count");
+    }
+
+    // A non-variadic msabi call uses the same positional row, so a leading
+    // float no longer shifts the following integers into a separate row. The
+    // callee is extern so the call survives optimization.
+    Built mixed = buildAs(
+        "msabi extern func alt(a: f64, b: int, c: f64, d: int) -> int;\n"
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "  return alt(1.0, 2, 3.0, 4);\n"
+        "}\n",
+        cider::target::Kind::Uefi, false, true, true, varargsLoader());
+    check(mixed.ok, "positional msabi arguments emit: " + mixed.stage);
+    if (mixed.ok) {
+        check(mixed.asmText.find("movsd xmm2,") != std::string::npos,
+              "the third positional float uses xmm2");
+        check(mixed.asmText.find("r9") != std::string::npos,
+              "the fourth positional word uses r9");
+    }
+
+    // The same positional layout runs end to end on an explicit msabi
+    // function: the named integer homes rcx, and the variadic pair takes the
+    // xmm1/rdx home and then the r8 home.
+    bool signaled = false;
+    int code = runCode(
+        "from std.varargs import VaList, va_start, va_arg_i32, va_arg_f64;\n"
+        "msabi func f(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap);\n"
+        "  var d: f64 = va_arg_f64(&ap);\n"
+        "  var i: int = va_arg_i32(&ap);\n"
+        "  return n + (d as int) + i;\n"
+        "}\n"
+        "func main() -> int { return f(10, 1.5, 28); }\n",
+        signaled, false, varargsLoader());
+    check(!signaled && code == 39,
+          "an msabi variadic callee reads shadow-space homes");
+
+    // Four named words exhaust the home row, so the variadic pair is read
+    // from the first two stack words above the shadow space.
+    code = runCode(
+        "from std.varargs import VaList, va_start, va_arg_i32, va_arg_f64;\n"
+        "msabi func g(a: int, b: int, c: int, d: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap);\n"
+        "  var f: f64 = va_arg_f64(&ap);\n"
+        "  var i: int = va_arg_i32(&ap);\n"
+        "  return a + b + c + d + (f as int) + i;\n"
+        "}\n"
+        "func main() -> int { return g(1, 2, 3, 4, 10.5, 22); }\n",
+        signaled, false, varargsLoader());
+    check(!signaled && code == 42,
+          "an msabi variadic callee reads the stack above the shadow space");
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -3593,6 +3680,7 @@ int main() {
     testArrowOperatorNative();
     testVariadicSysVAssembly();
     testVariadicSysVExecution();
+    testVariadicMsAbi();
     testTrap();
     testRemovedPrelude();
     testElementAddr();
