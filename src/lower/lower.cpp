@@ -2412,7 +2412,7 @@ void Lowerer::beginFuncFrame(const std::string& link, const Signature& sig,
             withSret.push_back(p);
         }
         fn.signature = Signature(std::move(withSret), fn.signature.returnType(),
-                                 fn.signature.abi());
+                                 fn.signature.abi(), fn.signature.variadic());
     }
     function_ = &fn;
     module_->functions.push_back(std::move(fn));

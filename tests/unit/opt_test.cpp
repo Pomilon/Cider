@@ -1796,6 +1796,38 @@ void testVariadicPipeline() {
           "no saved-argument state leaks into the caller");
 }
 
+// A variadic function returning a >2-word aggregate has a hidden sret word in
+// its IR signature. Rebuilding that signature must keep the variadic bit, or
+// the structural check refuses the body's va_start (VARIADICS.md §6).
+void testVariadicSretPipeline() {
+    std::printf("a variadic sret function passes the structural check\n");
+    Piped r = pipe(
+        "from std.varargs import VaList, va_start, va_end;\n"
+        "struct Big { var a: i64; var b: i64; var c: i64; }\n"
+        "func big(n: int, ...) -> Big {\n"
+        "  var ap: VaList = uninit; va_start(&ap); va_end(&ap);\n"
+        "  return Big { a: 1, b: 2, c: 3 };\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(r.ok, "a variadic sret function optimises: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    const cider::ir::Function* big = find(r.module.get(), "big");
+    const cider::ir::Instr* start = nullptr;
+    if (big != nullptr) {
+        for (const cider::ir::Block& block : big->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::VaStart) {
+                    start = &instr;
+                }
+            }
+        }
+    }
+    check(start != nullptr && start->vaNamedGp == 2,
+          "the rebuilt sret signature keeps variadic and counts the sret word");
+}
+
 int main() {
     std::printf("opt_test — malformed IR is refused, passes preserve meaning\n\n");
     testWellFormed();
@@ -1833,6 +1865,7 @@ int main() {
     testPhiStructureErrors();
     testVaOperationStructure();
     testVariadicPipeline();
+    testVariadicSretPipeline();
     testPhiLowering();
     testRodataDedup();
     testRodataDedupPinsAssembly();
