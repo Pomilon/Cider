@@ -112,7 +112,7 @@ private:
                                             Position start);
     std::unique_ptr<Stmt> parseStmt();
     std::unique_ptr<Stmt> parseBlock();
-    std::unique_ptr<VarDecl> parseVarDecl();
+    std::unique_ptr<VarDecl> parseVarDecl(bool global = false);
     std::unique_ptr<Stmt> parseIf();
     std::unique_ptr<Stmt> parseWhile();
     std::unique_ptr<Stmt> parseFor();

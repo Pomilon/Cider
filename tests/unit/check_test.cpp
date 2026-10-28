@@ -171,6 +171,56 @@ void testGlobalStruct() {
     check(enumGlobal.ok, "an enumerator folds into a global: " + enumGlobal.stage);
 }
 
+// A global needs a value the image can hold: null, a constant, or an
+// aggregate whose bytes are all known. The diagnostics should name the
+// missing initializer and point at `nilPtr` for pointers.
+void testGlobalInitDiagnostics() {
+    std::printf("global initialisers are explicit\n");
+    Checked zeroCast = check(
+        "var g: *int = 0 as *int;\n"
+        "func main() -> int { return 0; }\n");
+    check(zeroCast.ok, "a zero pointer cast is constant: " + zeroCast.stage);
+    Checked foldedZero = check(
+        "var g: *int = (1 - 1) as *int;\n"
+        "func main() -> int { return 0; }\n");
+    check(foldedZero.ok, "a folded zero pointer cast is constant: " +
+                             foldedZero.stage);
+    Checked nil = check(
+        "var g: *int = nil;\n"
+        "func main() -> int { return 0; }\n");
+    check(nil.ok, "nil is a global pointer initialiser: " + nil.stage);
+    Checked nilPtr = check(
+        "var g: *int = nilPtr;\n"
+        "func main() -> int { return 0; }\n");
+    check(nilPtr.ok, "nilPtr is a global pointer initialiser: " + nilPtr.stage);
+
+    Checked uninit = check(
+        "var g: *int = uninit;\n"
+        "func main() -> int { return 0; }\n");
+    bool uninitSays = false;
+    if (uninit.checker != nullptr) {
+        for (const cider::check::CheckError& e : uninit.checker->errors()) {
+            if (e.message.find("cannot be uninitialised") != std::string::npos &&
+                e.message.find("nilPtr") != std::string::npos) {
+                uninitSays = true;
+            }
+        }
+    }
+    check(!uninit.ok && uninit.stage == "check" && uninitSays,
+          "uninit points at nilPtr for a global pointer");
+
+    Checked omitted = check(
+        "var g: *int;\n"
+        "func main() -> int { return 0; }\n");
+    check(!omitted.ok && omitted.stage == "parse",
+          "an omitted global initialiser fails at parse");
+    Checked nonZero = check(
+        "var g: *int = 1 as *int;\n"
+        "func main() -> int { return 0; }\n");
+    check(!nonZero.ok && nonZero.stage == "check",
+          "a nonzero pointer cast is not constant");
+}
+
 // Names resolve through locals first, then the module scope.
 void testNames() {
     std::printf("names bind inside out\n");
@@ -3021,6 +3071,7 @@ int main() {
     testNames();
     testGlobalZero();
     testGlobalStruct();
+    testGlobalInitDiagnostics();
     testFloatGlobal();
     testEnumValues();
     testWideLit();

@@ -1138,6 +1138,15 @@ void Checker::visitProgram(Program& n) {
         // A global initialiser is constant or null: there is no startup code
         // and no order problem (FEATURES.md §7.3). Anything else needs a
         // function to run it, and globals have none.
+        if (dynamic_cast<const UninitExpr*>(g->init.get()) != nullptr) {
+            std::string message =
+                "a global cannot be uninitialised; give it a constant initialiser";
+            if (declared.type->kind() == Kind::Pointer) {
+                message += " (use nilPtr for a null pointer)";
+            }
+            fail(g->init->pos, message);
+            continue;
+        }
         if (dynamic_cast<const NilPtr*>(g->init.get()) != nullptr) {
             if (declared.type->kind() != Kind::Pointer &&
                 declared.type->kind() != Kind::FunctionPtr) {
@@ -1333,7 +1342,26 @@ void Checker::visitProgram(Program& n) {
                  declared.type->kind() == Kind::Pointer)) {
                 wideGlobal = true;
             }
+            // `0 as *T`: a zero pointer cast names the all-zero image
+            // bytes, the same value `nilPtr` writes. The cast itself is
+            // not an integer constant (evalConstInt only folds basic
+            // targets), so recognise the inner zero explicitly and let the
+            // normal checking below enforce the address type.
+            bool zeroPointerGlobal = false;
+            if (const auto* zeroCast = dynamic_cast<const Cast*>(g->init.get())) {
+                TypeRef target = resolver_.resolveType(
+                    zeroCast->target.get(), resolver_.scopeOf(module_));
+                if (!target.isError() &&
+                    target.type->kind() == Kind::Pointer &&
+                    declared.type->kind() == Kind::Pointer) {
+                    std::unordered_set<std::string> zeroActive;
+                    EvalResult zero =
+                        evalConstInt(*zeroCast->expr, *env_, zeroActive);
+                    zeroPointerGlobal = zero.ok && zero.value == 0;
+                }
+            }
             if (!constGlobal && !funcGlobal && !enumGlobal && !wideGlobal &&
+                !zeroPointerGlobal &&
                 (asFloat == nullptr || !floatGlobal) &&
                 !(floatGlobal && floatFolded.ok) &&
                 (asString == nullptr || !stringGlobal)) {

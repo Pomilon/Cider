@@ -383,7 +383,7 @@ std::unique_ptr<Decl> Parser::parseDecl() {
 }
 
 std::unique_ptr<VarDecl> Parser::parseGlobal() {
-    std::unique_ptr<VarDecl> var = parseVarDecl();
+    std::unique_ptr<VarDecl> var = parseVarDecl(true);
     return var;
 }
 
@@ -1248,7 +1248,7 @@ std::unique_ptr<Stmt> Parser::parseBlock() {
     return std::make_unique<Block>(start, std::move(stmts));
 }
 
-std::unique_ptr<VarDecl> Parser::parseVarDecl() {
+std::unique_ptr<VarDecl> Parser::parseVarDecl(bool global) {
     Position start = advance().pos;
     if (!check(TokenKind::Ident)) {
         failHere("a variable needs a name");
@@ -1269,7 +1269,10 @@ std::unique_ptr<VarDecl> Parser::parseVarDecl() {
                                          nullptr, isVolatile);
     }
     if (!match(TokenKind::Eq)) {
-        fail(peek().pos, "a variable needs an initialiser");
+        fail(peek().pos,
+             global ? "a global needs an initialiser (there is no implicit zero "
+                      "value; use nilPtr for a null pointer)"
+                    : "a variable needs an initialiser");
         return nullptr;
     }
     std::unique_ptr<Expr> init = parseExpr();

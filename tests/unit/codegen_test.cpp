@@ -700,6 +700,12 @@ void testGlobals() {
     std::printf("globals\n");
     check(runQuiet("var g: int = 40;\nfunc main() -> int { return g + 2; }\n") == 42,
           "a global reads back");
+    check(runQuiet("var g: *int = 0 as *int;\n"
+                   "func main() -> int {\n"
+                   "    if (g == nilPtr) { return 42; }\n"
+                   "    return 0;\n"
+                   "}\n") == 42,
+          "a zero-cast pointer global reads as null");
     check(runQuiet("enum Color { RED, GREEN }\n"
                    "var g: Color = Color.GREEN;\n"
                    "func main() -> int { return g as int; }\n") == 1,
