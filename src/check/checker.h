@@ -241,6 +241,7 @@ public:
     // Declarations and statements with rules.
     void visitProgram(Program& n) override;
     void visitFuncDecl(FuncDecl& n) override;
+    void visitExternFunc(ExternFunc& n) override;
     void visitStructDecl(StructDecl& n) override;
     void visitClassDecl(ClassDecl& n) override;
     void visitUnionDecl(UnionDecl& n) override;
@@ -334,6 +335,15 @@ private:
     bool checkOperatorOverload(Unary& expr, TypeRef operand, TypeRef& result);
     void checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs);
     TypeRef checkCall(Call& expr);
+    // The argument rule every direct call shares: named parameters check
+    // against their declared types, a variadic signature accepts a tail, and
+    // each tail argument is converted with the C default promotions
+    // (VARIADICS.md §4). Answers false on a rejected call.
+    bool checkCallArguments(Call& expr, const Signature& sig, bool generic);
+    // VARIADICS.md §5: va_list is a compiler-owned aggregate with a target
+    // layout, so it travels by address. Answers false when a signature spells
+    // it by value as a parameter or a return.
+    bool checkVaListSignature(const Signature& sig, Position pos);
     TypeRef checkField(Field& expr);
     // The member a value of `object` exposes under `expr.name`. Split from
     // checkField so an arrow can resolve the member on its pointee.

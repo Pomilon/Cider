@@ -28,7 +28,8 @@ add_compile_options(-Wall -Wextra -Werror -Werror=switch -Wno-unused-parameter)
 # which is why these switches have no `default:` -- see kind.cpp.
 
 add_library(cider_types STATIC src/types/kind.cpp src/types/type.cpp
-                               src/types/signature.cpp src/types/context.cpp)
+                               src/types/signature.cpp src/types/context.cpp
+                               src/types/variadic.cpp)
 target_include_directories(cider_types PUBLIC src)
 
 # --- The lexer ---------------------------------------------------------------

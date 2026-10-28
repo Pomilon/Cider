@@ -13,6 +13,7 @@
 
 #include "ast/operator.h"
 #include "types/context.h"
+#include "types/variadic.h"
 
 namespace cider {
 namespace check {
@@ -1435,6 +1436,9 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     if (failed) {
         return;
     }
+    if (!checkVaListSignature(sig, n.pos)) {
+        return;
+    }
     if (n.name == "operator_new" || n.name == "operator_delete") {
         const Type* pv = ctx_.pointer(ctx_.void_());
         if (n.name == "operator_new") {
@@ -1525,6 +1529,18 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     funcReturn_ = saved;
     inFunc_ = was;
     popScope();
+}
+
+void Checker::visitExternFunc(ExternFunc& n) {
+    // An extern has no body to walk, but its declaration still names a
+    // calling shape: the by-value va_list rule has to hold here too, or a
+    // declaration nobody calls would be accepted and later unsupported.
+    const resolve::Decl* decl = resolver_.lookup(moduleScope_, n.name);
+    if (decl == nullptr) {
+        fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
+        return;
+    }
+    checkVaListSignature(decl->sig, n.pos);
 }
 
 void Checker::visitStructDecl(StructDecl& n) {
@@ -4979,17 +4995,77 @@ TypeRef Checker::checkCall(Call& expr) {
         fail(expr.pos, "not callable");
         return errorRef();
     }
-    if (expr.args.size() != sig.arity()) {
-        fail(expr.pos, "wrong number of arguments");
+    if (!checkCallArguments(expr, sig, false)) {
         return errorRef();
-    }
-    for (uint64_t i = 0; i < static_cast<uint64_t>(expr.args.size()); ++i) {
-        TypeRef want{sig.parameters()[i].type};
-        TypeRef got = checkExpr(expr.args[i].get(), want);
-        checkCompatible(expr.args[i]->pos, expr.args[i].get(), got, want);
     }
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
     return TypeRef{ret};
+}
+
+bool Checker::checkVaListSignature(const Signature& sig, Position pos) {
+    // VARIADICS.md §5: va_list is an opaque aggregate whose size, alignment
+    // and layout belong to the target ABI. Storage declares the cursor (the
+    // `var ap: VaList = uninit;` in the document's example); every crossing
+    // of a call boundary passes it by address, which is why std.varargs
+    // spells `*VaList` and never `VaList`. A by-value parameter or return has
+    // no ABI rule in this slice, so the signature is refused rather than
+    // accepted and left for lowering to guess.
+    if (sig.returnType() != nullptr && sig.returnType()->kind() == Kind::VaList) {
+        fail(pos, "va_list must be returned by pointer (*va_list)");
+        return false;
+    }
+    for (const Parameter& parameter : sig.parameters()) {
+        if (parameter.type != nullptr && parameter.type->kind() == Kind::VaList) {
+            fail(pos, "va_list must be passed by pointer (*va_list)");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Checker::checkCallArguments(Call& expr, const Signature& sig, bool generic) {
+    // `generic` names the path (a substituted specialization rather than a
+    // direct declaration); the argument rule is the same one, so it changes
+    // nothing below.
+    (void)generic;
+    const uint64_t named = sig.arity();
+    const uint64_t got = static_cast<uint64_t>(expr.args.size());
+    if (got < named || (!sig.variadic() && got > named)) {
+        if (sig.variadic()) {
+            fail(expr.pos, "this call expects at least " +
+                               std::to_string(named) + " arguments");
+        } else {
+            fail(expr.pos, "wrong number of arguments");
+        }
+        return false;
+    }
+    // A callee signature can spell va_list by value even where no declaration
+    // walk saw it (an imported extern, a function-pointer type), so the call
+    // refuses the shape here as well: there is no by-value ABI for it.
+    if (!checkVaListSignature(sig, expr.pos)) {
+        return false;
+    }
+    for (uint64_t i = 0; i < named; ++i) {
+        TypeRef want{sig.parameters()[i].type};
+        TypeRef value = checkExpr(expr.args[i].get(), want);
+        checkCompatible(expr.args[i]->pos, expr.args[i].get(), value, want);
+    }
+    // Arguments past the named parameters cross the C variadic tail: each is
+    // converted with the default promotions, and a type outside the table has
+    // no C variadic representation (VARIADICS.md §4).
+    for (uint64_t i = named; i < got; ++i) {
+        TypeRef value = checkExpr(expr.args[i].get(), TypeRef{ctx_.wildcard()});
+        auto promoted = promoteVariadicArgument(value, ctx_);
+        if (!promoted.has_value()) {
+            fail(expr.args[i]->pos,
+                 "a variadic argument must be an integer, pointer or f64");
+            if (value.type != nullptr && value.type->kind() == Kind::String) {
+                fail(expr.args[i]->pos, "pass the data pointer for a C string");
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
@@ -5026,14 +5102,8 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
         fail(expr.pos, "checker bug: specialization has no signature");
         return errorRef();
     }
-    if (expr.args.size() != sig->arity()) {
-        fail(expr.pos, "wrong number of arguments");
+    if (!checkCallArguments(expr, *sig, true)) {
         return errorRef();
-    }
-    for (uint64_t i = 0; i < static_cast<uint64_t>(expr.args.size()); ++i) {
-        TypeRef want{sig->parameters()[i].type};
-        TypeRef got = checkExpr(expr.args[i].get(), want);
-        checkCompatible(expr.args[i]->pos, expr.args[i].get(), got, want);
     }
     // Walk the template body once per specialization, with the arguments
     // substituted and the sink detached: lowering generic bodies belongs to

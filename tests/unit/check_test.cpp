@@ -3138,10 +3138,125 @@ void testVaListType() {
     check(ok.ok, "VaList resolves and can be uninitialised: " + ok.stage);
     Checked field = check(
         "from std.varargs import VaList;\n"
-        "func f(ap: VaList) -> u32 { return ap.gp_offset; }\n",
+        "func f() -> u32 { var ap: VaList = uninit; return ap.gp_offset; }\n",
         varargsLoader());
     check(!field.ok && field.stage == "check",
           "va_list fields are not user-accessible: " + field.stage);
+}
+
+// VARIADICS.md §4: a call to a variadic signature takes at least its named
+// parameters, and every argument past them is converted with the C default
+// promotions. Only integers, pointers and f64 survive; a string keeps its
+// own hint.
+void testVariadicCalls() {
+    std::printf("variadic calls and promotions\n");
+    Checked ok = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int { return sink(\"x\", 1 as i8, true, 2.0 as f32); }\n");
+    check(ok.ok, "extra scalar arguments are accepted: " + ok.stage);
+    Checked few = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int { return sink(); }\n");
+    check(!few.ok && hasDiagnostic(few, "expects at least 1"),
+          "variadic call still requires named arguments");
+    Checked aggregate = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int { return sink(\"x\", \"y\"); }\n");
+    check(!aggregate.ok && hasDiagnostic(aggregate, "integer, pointer or f64"),
+          "a string variadic argument is rejected");
+    check(hasDiagnostic(aggregate, "pass the data pointer for a C string"),
+          "a string variadic argument keeps its pointer hint");
+    Checked ptr = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "var p: *func(*char, ...) -> int = &sink;\n"
+        "func f() -> int { return p(\"x\", 7); }\n");
+    check(ptr.ok, "a variadic function pointer carries the bit: " + ptr.stage);
+    // VARIADICS.md §2-3: the flag is part of signature identity, so the two
+    // pointer spellings never substitute for one another.
+    Checked p1 = check("var a: *func(int) -> int = nilPtr;\n"
+                       "var b: *func(int, ...) -> int = a;\n");
+    check(!p1.ok, "variadic and non-variadic pointers are incompatible");
+    // Named parameters keep their declared types: no promotion applies there.
+    Checked named = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int { return sink(1, 2); }\n");
+    check(!named.ok && named.stage == "check",
+          "a named parameter still checks its declared type: " + named.stage);
+    // A specialization reaches the same argument rule as a direct call.
+    Checked generic = check(
+        "func first<T>(x: T, ...) -> T { return x; }\n"
+        "func f() -> int { return first::<int>(1, 2, 3); }\n");
+    check(generic.ok, "a variadic specialization accepts its tail: " + generic.stage);
+    Checked genericBad = check(
+        "func first<T>(x: T, ...) -> T { return x; }\n"
+        "func f() -> int { return first::<int>(1, \"x\"); }\n");
+    check(!genericBad.ok && hasDiagnostic(genericBad, "integer, pointer or f64"),
+          "a variadic specialization rejects an aggregate tail");
+    // VARIADICS.md §2: methods and operators have no C ABI meaning, so the
+    // spelling stays rejected (the parser refuses it; this proves the
+    // rejection survives the whole pipeline).
+    Checked method = check("class C { func m(a: int, ...) { } }\n");
+    check(!method.ok, "a variadic method is still rejected");
+    Checked op = check("func operator+(a: int, ...) -> int { return a; }\n");
+    check(!op.ok, "a variadic operator is still rejected");
+}
+
+// A variadic definition rebuilds its body signature with the bit (and the
+// ABI) intact: the body's recursive call and the definition's address both
+// keep `...` (VARIADICS.md §2-5).
+void testVariadicBodySignature() {
+    std::printf("a variadic body rebuilds its signature\n");
+    Checked body = check(
+        "msabi func count(n: int, ...) -> int {\n"
+        "    var p: *msabi func(int, ...) -> int = &count;\n"
+        "    return p(n, 1);\n"
+        "}\n"
+        "func user() -> int { return count(2, 3); }\n");
+    check(body.ok, "a variadic definition keeps the bit and ABI: " + body.stage);
+    Checked bodyPtr = check(
+        "func count(n: int, ...) -> int { return count(n, 1); }\n"
+        "var p: *func(int) -> int = &count;\n");
+    check(!bodyPtr.ok && bodyPtr.stage == "check",
+          "a variadic definition is not a non-variadic pointer: " + bodyPtr.stage);
+}
+
+// VARIADICS.md §5: va_list is a compiler-owned aggregate whose layout is the
+// target's, so it travels by address. Storage keeps the cursor; parameters,
+// returns and variadic arguments spell *VaList (std.varargs does).
+void testVaListByValue() {
+    std::printf("va_list travels by pointer\n");
+    Checked param = check(
+        "from std.varargs import VaList;\n"
+        "func f(ap: VaList) -> void { }\n",
+        varargsLoader());
+    check(!param.ok && hasDiagnostic(param, "passed by pointer"),
+          "a va_list parameter must be a pointer");
+    Checked ret = check(
+        "from std.varargs import VaList;\n"
+        "func f() -> VaList { var ap: VaList = uninit; return ap; }\n",
+        varargsLoader());
+    check(!ret.ok && hasDiagnostic(ret, "returned by pointer"),
+          "a va_list return must be a pointer");
+    Checked externParam = check(
+        "from std.varargs import VaList;\n"
+        "extern func take(ap: VaList) -> void;\n"
+        "func f() -> void { var ap: VaList = uninit; take(ap); }\n",
+        varargsLoader());
+    check(!externParam.ok && hasDiagnostic(externParam, "passed by pointer"),
+          "an imported va_list parameter must be a pointer");
+    Checked variadicArg = check(
+        "from std.varargs import VaList;\n"
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int { var ap: VaList = uninit; return sink(\"x\", ap); }\n",
+        varargsLoader());
+    check(!variadicArg.ok && hasDiagnostic(variadicArg, "integer, pointer or f64"),
+          "a by-value va_list is not a variadic argument");
+    Checked byPtr = check(
+        "from std.varargs import VaList;\n"
+        "extern func take(ap: *VaList) -> void;\n"
+        "func f() -> void { var ap: VaList = uninit; take(&ap); }\n",
+        varargsLoader());
+    check(byPtr.ok, "a va_list is passed by pointer: " + byPtr.stage);
 }
 
 // A variadic signature keeps its `...` through function-pointer assignment:
@@ -3250,6 +3365,9 @@ int main() {
     testShiftCount();
     testVaListType();
     testVariadicFunctionPointers();
+    testVariadicCalls();
+    testVariadicBodySignature();
+    testVaListByValue();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
