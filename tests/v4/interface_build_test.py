@@ -207,6 +207,63 @@ def main():
             fail("--allow-stale-interface did not accept a bad format "
                  "through source fallback: " + describe(allowed_version))
 
+        # --- Variadic signatures survive the interface round trip ----------
+        # VARIADICS.md §9: `...` is rendered in functions and function-pointer
+        # types and restored when the interface is imported without source.
+        vlib_path = os.path.join(tmp, "vlib.cid")
+        vmain_path = os.path.join(tmp, "vmain.cid")
+        write(vlib_path, """export extern func printf(fmt: *char, ...) -> int;
+export func count(n: int, ...) -> int { return n; }
+export type Callback = *func(*char, ...) -> int;
+""")
+        vlib_obj = os.path.join(ifdir, "vlib.o")
+        vlib_iface = os.path.join(ifdir, "vlib.cidm")
+        vmain_obj = os.path.join(tmp, "vmain.o")
+        vapp = os.path.join(tmp, "vapp")
+        compiled = run([CIDER, "compile", "-c", "--module", "vlib",
+                        vlib_path, "-o", vlib_obj])
+        if compiled.returncode != 0:
+            fail("variadic library compile: " + describe(compiled))
+        elif not os.path.exists(vlib_iface):
+            fail("variadic library compile did not emit vlib.cidm")
+        else:
+            text = read(vlib_iface)
+            for needle in ("extern func printf(fmt: *char, ...) -> i32;",
+                           "func count(n: i32, ...) -> i32;",
+                           "type Callback = *func(*char, ...) -> i32;"):
+                if needle not in text:
+                    fail("variadic interface does not contain %r:\n%s" %
+                         (needle, text))
+        shutil.move(vlib_path, vlib_path + ".hidden")
+        write(vmain_path, """import vlib;
+
+func _start() -> void {
+    var cb: vlib.Callback = nilPtr;
+    var n: int = vlib.count(37, 1, 2);
+    var code: int = n + 5;
+    asm {
+        "mov rax, 60"
+        "mov rdi, {code:q}"
+        "syscall"
+    }
+}
+""")
+        compiled = run([CIDER, "compile", "-c", "--module", "main",
+                        "--interface-dir", ifdir, vmain_path, "-o", vmain_obj])
+        if compiled.returncode != 0:
+            fail("variadic entry compile against interface: " +
+                 describe(compiled))
+        else:
+            linked = run([CIDER, "link", "-o", vapp, vmain_obj, vlib_obj])
+            if linked.returncode != 0:
+                fail("variadic interface split link: " + describe(linked))
+            else:
+                executed = run([vapp])
+                if executed.returncode != 42:
+                    fail("variadic interface binary exited %r, not 42" %
+                         (executed.returncode,))
+        shutil.move(vlib_path + ".hidden", vlib_path)
+
         # --- Build cache: hit, miss, dependent invalidation ----------------
         cache_dir = os.path.join(tmp, "cache")
         objects = os.path.join(tmp, "objects")

@@ -139,6 +139,9 @@ bool renderType(const TypeExpr& type, std::string& out) {
         if (!renderTypeList(sig->params, out)) {
             return false;
         }
+        if (sig->variadic) {
+            out += ", ...";
+        }
         out += ")";
         if (sig->returns != nullptr) {
             out += " -> ";
@@ -436,7 +439,8 @@ bool renderExpr(const Expr& expr, std::string& out) {
     return false;
 }
 
-bool renderParams(const std::vector<Param>& params, std::string& out) {
+bool renderParams(const std::vector<Param>& params, bool variadic,
+                  std::string& out) {
     out += "(";
     bool first = true;
     for (const Param& param : params) {
@@ -453,13 +457,21 @@ bool renderParams(const std::vector<Param>& params, std::string& out) {
             return false;
         }
     }
+    // VARIADICS.md §9: a trailing `...` is part of the declaration surface.
+    if (variadic) {
+        if (!first) {
+            out += ", ";
+        }
+        out += "...";
+    }
     out += ")";
     return true;
 }
 
 bool renderFunctionTail(const std::vector<Param>& params,
-                        const TypeExpr* returns, std::string& out) {
-    if (!renderParams(params, out)) {
+                        const TypeExpr* returns, bool variadic,
+                        std::string& out) {
+    if (!renderParams(params, variadic, out)) {
         return false;
     }
     if (returns != nullptr) {
@@ -514,7 +526,7 @@ bool renderMethod(const MethodDecl& method, std::string& out) {
     }
     out += "func ";
     out += method.name;
-    if (!renderParams(method.params, out)) {
+    if (!renderParams(method.params, false, out)) {
         return false;
     }
     if (method.returns != nullptr) {
@@ -581,7 +593,8 @@ struct Renderer {
             }
             text += "func ";
             text += fn->name;
-            if (!renderFunctionTail(fn->params, fn->returns.get(), text)) {
+            if (!renderFunctionTail(fn->params, fn->returns.get(),
+                                    fn->variadic, text)) {
                 skip("function signature");
                 return;
             }
@@ -598,7 +611,7 @@ struct Renderer {
             }
             text += "extern func ";
             text += ext->name;
-            if (!renderParams(ext->params, text)) {
+            if (!renderParams(ext->params, ext->variadic, text)) {
                 skip("extern signature");
                 return;
             }

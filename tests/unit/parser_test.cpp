@@ -26,10 +26,11 @@ void check(bool holds, const char* what) {
     }
 }
 
-std::unique_ptr<cider::Program> parse(const std::string& text, bool& ok) {
+std::unique_ptr<cider::Program> parse(const std::string& text, bool& ok,
+                                      bool interfaceMode = false) {
     cider::Lexer lexer("test.cid", text);
     std::vector<cider::Token> tokens = lexer.lex();
-    cider::Parser parser("test.cid", std::move(tokens));
+    cider::Parser parser("test.cid", std::move(tokens), interfaceMode);
     std::unique_ptr<cider::Program> program = parser.parse();
     ok = parser.ok() && lexer.errors().empty();
     if (!parser.ok()) {
@@ -723,6 +724,32 @@ void testVariadicSyntax() {
     ok = false;
     parse("func f() -> void { new func(int, ...)(); }\n", ok);
     check(!ok, "new cannot produce a variadic closure type");
+    // VARIADICS.md §9: the `.cidm` parser reads the rendered declaration shape
+    // back with the flag intact, so an imported call needs no source. Ordinary
+    // source still requires a body.
+    ok = false;
+    auto iface = parse(
+        "func count(n: i32, ...) -> i32;\n"
+        "extern func printf(fmt: *char, ...) -> i32;\n"
+        "type Callback = *func(*char, ...) -> i32;\n",
+        ok, true);
+    check(ok, "a rendered variadic interface parses");
+    if (ok) {
+        const auto& ifn = static_cast<const cider::FuncDecl&>(*iface->decls[0]);
+        const auto& iext =
+            static_cast<const cider::ExternFunc&>(*iface->decls[1]);
+        const auto& alias =
+            static_cast<const cider::TypeAlias&>(*iface->decls[2]);
+        const auto& ptr =
+            static_cast<const cider::PointerType&>(*alias.target);
+        const auto& isig = static_cast<const cider::FuncSigType&>(*ptr.pointee);
+        check(ifn.variadic, "an interface function restores ...");
+        check(iext.variadic, "an interface extern restores ...");
+        check(isig.variadic, "an interface function pointer restores ...");
+    }
+    ok = false;
+    parse("func count(n: i32, ...) -> i32;\n", ok);
+    check(!ok, "ordinary source still requires a body");
 }
 
 int main() {
