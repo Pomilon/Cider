@@ -3093,6 +3093,83 @@ void testArrowOperator() {
           "an arrow operator must be a member");
 }
 
+// --- VARIADICS.md §5: the std.varargs surface --------------------------------
+
+// modules/std/varargs.cid, embedded: a unit test runs from any working
+// directory, so the loader carries the text instead of reading the tree. The
+// file is the authority; the driver probe over CIDER_LIB checks the real one.
+const char* kVarargsSource =
+    "// std.varargs - C variadic argument access.\n"
+    "//\n"
+    "// VaList is compiler-owned. These declarations are recognized by the\n"
+    "// compiler and replaced with target ABI operations; no Cider body exists.\n"
+    "\n"
+    "export type VaList = va_list;\n"
+    "\n"
+    "extern func va_start(ap: *VaList) -> void;\n"
+    "extern func va_copy(dst: *VaList, src: *VaList) -> void;\n"
+    "extern func va_end(ap: *VaList) -> void;\n"
+    "\n"
+    "extern func va_arg_i32(ap: *VaList) -> i32;\n"
+    "extern func va_arg_i64(ap: *VaList) -> i64;\n"
+    "extern func va_arg_u64(ap: *VaList) -> u64;\n"
+    "extern func va_arg_f64(ap: *VaList) -> f64;\n"
+    "extern func va_arg_ptr(ap: *VaList) -> *void;\n";
+
+cider::resolve::Resolver::ModuleLoader varargsLoader() {
+    return [](const std::string& name) -> std::unique_ptr<cider::Program> {
+        if (name != "std.varargs") {
+            return nullptr;
+        }
+        cider::Lexer lexer("varargs.cid", kVarargsSource);
+        cider::Parser parser("varargs.cid", lexer.lex());
+        return parser.parse();
+    };
+}
+
+// VaList resolves through the import and is opaque: the SysV field names
+// (VARIADICS.md §6) belong to the target ABI, never to user code.
+void testVaListType() {
+    std::printf("va_list is opaque\n");
+    Checked ok = check(
+        "from std.varargs import VaList;\n"
+        "func f() -> void { var ap: VaList = uninit; }\n",
+        varargsLoader());
+    check(ok.ok, "VaList resolves and can be uninitialised: " + ok.stage);
+    Checked field = check(
+        "from std.varargs import VaList;\n"
+        "func f(ap: VaList) -> u32 { return ap.gp_offset; }\n",
+        varargsLoader());
+    check(!field.ok && field.stage == "check",
+          "va_list fields are not user-accessible: " + field.stage);
+}
+
+// A variadic signature keeps its `...` through function-pointer assignment:
+// the flag takes part in sameSignature (VARIADICS.md §2-3), so a variadic
+// pointer is never usable where a non-variadic one is wanted. The ABI rides
+// alongside it and is not lost when the checker rebuilds a body signature.
+void testVariadicFunctionPointers() {
+    std::printf("variadic function pointers preserve signature and ABI\n");
+    Checked same = check(
+        "extern func printf(fmt: *char, ...) -> int;\n"
+        "var p: *func(*char, ...) -> int = &printf;\n");
+    check(same.ok, "a variadic extern addresses a variadic pointer: " + same.stage);
+    Checked diff = check(
+        "extern func printf(fmt: *char, ...) -> int;\n"
+        "var p: *func(*char) -> int = &printf;\n");
+    check(!diff.ok && diff.stage == "check",
+          "a variadic pointer is not a non-variadic pointer: " + diff.stage);
+    Checked msabi = check(
+        "msabi extern func printf(fmt: *char, ...) -> int;\n"
+        "var p: *msabi func(*char, ...) -> int = &printf;\n");
+    check(msabi.ok, "the ABI rides the variadic pointer: " + msabi.stage);
+    Checked wrongAbi = check(
+        "msabi extern func printf(fmt: *char, ...) -> int;\n"
+        "var p: *func(*char, ...) -> int = &printf;\n");
+    check(!wrongAbi.ok && wrongAbi.stage == "check",
+          "a variadic pointer still compares its ABI: " + wrongAbi.stage);
+}
+
 int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
@@ -3171,6 +3248,8 @@ int main() {
     testRange();
     testDuplicateMethods();
     testShiftCount();
+    testVaListType();
+    testVariadicFunctionPointers();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

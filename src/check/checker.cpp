@@ -646,7 +646,7 @@ TypeRef Checker::substDeep(TypeRef type) {
         if (!changed) {
             return type;
         }
-        Signature rebuilt(std::move(params), subRet.type, sig.abi());
+        Signature rebuilt(std::move(params), subRet.type, sig.abi(), sig.variadic());
         if (kind == Kind::Closure) {
             return TypeRef{ctx_.closure(std::move(rebuilt))};
         }
@@ -1429,7 +1429,9 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     // rather than guessing order.
     globalProv_.clear();
     bool failed = false;
-    Signature sig = resolver_.buildSignature(n.params, n.returns.get(), moduleScope_, failed);
+    Abi abi = resolver_.abiOf(n.abi, failed, n.pos);
+    Signature sig = resolver_.buildSignature(n.params, n.returns.get(), moduleScope_,
+                                             failed, abi, n.variadic);
     if (failed) {
         return;
     }

@@ -30,6 +30,9 @@ enum class Kind {
     Class,
     Interface,
     Union,
+    VaList,       // the compiler-owned C variadic cursor (VARIADICS.md §5);
+                  // opaque: its fields belong to the target ABI, never to
+                  // user code, and its layout comes from layout.h alone
     Enum,
     Closure,      // func(...) - a closure OBJECT (see §4.5)
     FunctionPtr,  // *func(...) -> T

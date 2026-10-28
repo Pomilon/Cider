@@ -23,6 +23,7 @@ const char* kindName(Kind kind) {
         case Kind::Class: return "class";
         case Kind::Interface: return "interface";
         case Kind::Union: return "union";
+        case Kind::VaList: return "va_list";
         case Kind::Enum: return "enum";
         case Kind::Closure: return "closure";
         case Kind::FunctionPtr: return "function pointer";
@@ -151,6 +152,7 @@ bool kindHasResolvedLayout(Kind kind) {
         case Kind::Class:
         case Kind::Interface:
         case Kind::Union:
+        case Kind::VaList:
         case Kind::Enum:
         case Kind::Closure:
         case Kind::FunctionPtr:
@@ -179,6 +181,8 @@ bool kindIsHeapOwned(Kind kind) {
         //   (SEMANTICS.md §9.3).
         //   Closure is a value whose captures are never released by the
         //   language (MEMORY.md §3.2).
+        //   VaList is a cursor into the caller's saved argument area
+        //   (VARIADICS.md §5); it owns nothing.
         case Kind::Error:
         case Kind::Void:
         case Kind::String:
@@ -186,6 +190,7 @@ bool kindIsHeapOwned(Kind kind) {
         case Kind::Pointer:
         case Kind::Slice:
         case Kind::Interface:
+        case Kind::VaList:
         case Kind::Enum:
         case Kind::Closure:
         case Kind::FunctionPtr:

@@ -13,7 +13,8 @@ namespace {
 
 bool payloadMatches(Kind kind, const TypePayload& a, const TypePayload& b) {
     if (kind == Kind::Void || kind == Kind::String || kind == Kind::Error ||
-        kind == Kind::Wildcard || kind == Kind::FunctionItem) {
+        kind == Kind::Wildcard || kind == Kind::FunctionItem ||
+        kind == Kind::VaList) {
         return true;
     }
     if (kind == Kind::Basic) {
@@ -142,6 +143,14 @@ const Type* TypeContext::nominal(Kind kind, DeclId decl) {
         return f;
     }
     return store(new Type(p, kind));
+}
+
+const Type* TypeContext::vaList() {
+    VaListPayload p;
+    if (const Type* f = find(Kind::VaList, TypePayload(p))) {
+        return f;
+    }
+    return store(new Type(p));
 }
 
 const Type* TypeContext::functionPtr(Signature signature) {

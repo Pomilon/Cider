@@ -484,8 +484,12 @@ int Lowerer::wordCount(TypeRef type) {
         return 2;
     }
     int64_t bytes = -1;
-    if (kind == Kind::Array || kind == Kind::Union || kind == Kind::Class ||
-        kind == Kind::Closure || kind == Kind::Enum) {
+    if (kind == Kind::VaList) {
+        // The compiler-owned cursor is a value of known size, not a nominal
+        // whose fields this layer lays out (VARIADICS.md §5).
+        bytes = typeSize(type.type);
+    } else if (kind == Kind::Array || kind == Kind::Union || kind == Kind::Class ||
+               kind == Kind::Closure || kind == Kind::Enum) {
         bytes = resolver_.nominalSize(type.type);
     } else if (kind == Kind::Struct) {
         std::optional<DeclId> id = type.type->decl();

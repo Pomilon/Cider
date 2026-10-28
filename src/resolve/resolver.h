@@ -220,6 +220,11 @@ public:
     Signature buildSignature(const std::vector<Param>& params, const TypeExpr* returns,
                              const Scope* scope, bool& failed, Abi abi = Abi::SysV,
                              bool variadic = false);
+    // 8.4: maps an `msabi`/`sysv` spelling to its Abi. An unknown spelling is
+    // an error, never a silent default. Public because the checker rebuilds a
+    // function's signature when it walks the body and must preserve the
+    // declared convention.
+    Abi abiOf(const std::string& spelling, bool& failed, Position pos);
     // Binds one type parameter into a scope, for the checker's generic body
     // walks. The resolver owns every Decl; the checker borrows them.
     const Decl* bindTypeParam(const Scope* scope, const std::string& name,
@@ -278,9 +283,6 @@ public:
 
 private:
     void fail(Position pos, const std::string& message);
-    // 8.4: maps an `msabi`/`sysv` spelling to its Abi. An unknown spelling is
-    // an error, never a silent default.
-    Abi abiOf(const std::string& spelling, bool& failed, Position pos);
     const Scope* makeScope(const Scope* parent, const std::string& module);
     Decl* bind(const Scope* scope, DeclKind kind, const std::string& name, Position pos);
     bool resolveModule(const std::string& name);

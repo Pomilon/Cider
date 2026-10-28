@@ -11,6 +11,8 @@
 
 #include "parse/parser.h"
 
+#include "ast/operator.h"
+
 namespace cider {
 
 namespace {
@@ -496,7 +498,8 @@ std::unique_ptr<Decl> Parser::parseFuncDecl(bool) {
         }
     }
     bool variadic = false;
-    std::vector<Param> params = parseParams(true, variadic, "");
+    std::vector<Param> params =
+        parseParams(!isOperatorName(name), variadic, "operators cannot be variadic");
     // `-` is binary by spelling but unary by arity. The declaration's own
     // parameter count names the operator before the checker sees it.
     if (params.size() == kOneParameter && name == "operator_sub") {
@@ -2751,6 +2754,15 @@ std::unique_ptr<Expr> Parser::parseNew(bool tryNew) {
     std::unique_ptr<TypeExpr> type = parsePrimaryType();
     if (type == nullptr) {
         return nullptr;
+    }
+    // `new` reaches the type through parsePrimaryType, which does not know
+    // the `*` depth; apply parseType's closure rule here so a variadic
+    // function type cannot become a closure value through this spelling.
+    if (const auto* sig = dynamic_cast<const FuncSigType*>(type.get())) {
+        if (sig->variadic) {
+            failHere("closures cannot be variadic");
+            return nullptr;
+        }
     }
     if (check(TokenKind::LBrace)) {
         advance();

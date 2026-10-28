@@ -27,6 +27,7 @@ Type::Type(PointerPayload payload) : kind_(Kind::Pointer), payload_(payload) {}
 Type::Type(ArrayPayload payload) : kind_(Kind::Array), payload_(payload) {}
 Type::Type(SlicePayload payload) : kind_(Kind::Slice), payload_(payload) {}
 Type::Type(NominalPayload payload, Kind kind) : kind_(kind), payload_(payload) {}
+Type::Type(VaListPayload payload) : kind_(Kind::VaList), payload_(payload) {}
 Type::Type(SignaturePayload payload, Kind kind) : kind_(kind), payload_(payload) {}
 Type::Type(TypeParamPayload payload) : kind_(Kind::TypeParam), payload_(payload) {}
 Type::Type(AliasPayload payload) : kind_(Kind::Alias), payload_(payload) {}
@@ -121,6 +122,14 @@ std::string sigText(const Signature& sig, bool isPointer) {
             out += " var";
         }
     }
+    // VARIADICS.md §3: the flag is part of the type's identity, so a
+    // diagnostic must not print a variadic signature as a non-variadic one.
+    if (sig.variadic()) {
+        if (!first) {
+            out += ", ";
+        }
+        out += "...";
+    }
     out += ")";
     if (sig.returnType() != nullptr) {
         out += " -> ";
@@ -171,6 +180,8 @@ std::string typeName(TypeRef ref) {
             out += ")";
             return out;
         }
+        case Kind::VaList:
+            return "va_list";
         case Kind::Closure:
             return sigText(*t->signature(), false);
         case Kind::FunctionPtr:
@@ -251,6 +262,8 @@ int64_t typeSize(const Type* t) {
         case Kind::Pointer:
         case Kind::FunctionPtr:
             return layout::kSizePointer;
+        case Kind::VaList:
+            return layout::kSizeVaList;
         case Kind::Slice:
             return layout::kSizeSlice;
         case Kind::Interface:

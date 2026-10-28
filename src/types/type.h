@@ -112,6 +112,11 @@ struct AliasPayload {
 
 struct WildcardPayload {};
 
+// VaList carries no payload: one interned Type per context names the
+// compiler-owned va_list (VARIADICS.md §5). Its fields belong to the target
+// ABI, so nothing here spells them and no accessor reaches into it.
+struct VaListPayload {};
+
 struct ErrorPayload {};
 
 // FunctionItem carries no payload: a function name is not a type, and its type
@@ -128,6 +133,7 @@ using TypePayload = std::variant<
     ArrayPayload,        // Kind::Array
     SlicePayload,        // Kind::Slice
     NominalPayload,      // Kind::Struct, Class, Interface, Union, Enum
+    VaListPayload,       // Kind::VaList
     SignaturePayload,    // Kind::FunctionPtr, Closure
     TypeParamPayload,    // Kind::TypeParam
     AliasPayload,        // Kind::Alias
@@ -198,6 +204,7 @@ private:
     explicit Type(ArrayPayload payload);
     explicit Type(SlicePayload payload);
     explicit Type(NominalPayload payload, Kind kind);
+    explicit Type(VaListPayload payload);
     explicit Type(SignaturePayload payload, Kind kind);
     explicit Type(TypeParamPayload payload);
     explicit Type(AliasPayload payload);

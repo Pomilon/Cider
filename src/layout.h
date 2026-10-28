@@ -81,6 +81,15 @@ constexpr int64_t kSizeEnum = 4;
 // The union tag is a u32 index into the member list, and it is not a member.
 constexpr int64_t kSizeUnionTag = 4;
 
+// A va_list is the SysV AMD64 `__va_list_tag`: two u32 offsets and two
+// pointers, 24 bytes at 8-byte alignment (VARIADICS.md §6). The Microsoft
+// x64 ABI's list is an 8-byte stack cursor (§7), but both targets carry the
+// same 24-byte extent — Microsoft simply uses the first 8 bytes — so one
+// size serves both and the ABI difference is the lowering's, not the layout's.
+// The alignment falls out of the alignOf ladder in types/type.cpp: 24 bytes
+// aligns to 8, like every aggregate whose widest member is a pointer.
+constexpr int64_t kSizeVaList = 24;
+
 // --- Alignment ---------------------------------------------------------------
 //
 // Every 8-byte form aligns to 8, every 4-byte form to 4. There is no 16-byte

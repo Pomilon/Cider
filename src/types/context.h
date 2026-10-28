@@ -37,6 +37,9 @@ public:
     // kind is one of Struct, Class, Interface, Union, Enum; anything else is
     // answered with poison, because a nominal of another Kind is not a thing.
     const Type* nominal(Kind kind, DeclId decl);
+    // The compiler-owned C variadic cursor (VARIADICS.md §5). One interned
+    // Type names it; its fields belong to the target ABI, not to any payload.
+    const Type* vaList();
     const Type* functionPtr(Signature signature);
     const Type* closure(Signature signature);
     const Type* typeParam(DeclId decl, uint32_t index);

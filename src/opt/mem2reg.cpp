@@ -81,6 +81,7 @@ bool scalarSlot(const TypeRef& type) {
         case Kind::Class:
         case Kind::Interface:
         case Kind::Union:
+        case Kind::VaList:
         case Kind::Closure:
         case Kind::FunctionItem:
         case Kind::TypeParam:

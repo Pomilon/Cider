@@ -1947,6 +1947,12 @@ TypeRef Resolver::resolveNamed(const NamedType* type, const Scope* scope) {
         if (type->name == "void") {
             return TypeRef{ctx_.void_()};
         }
+        // VARIADICS.md §5: `va_list` is compiler-owned. Its size, alignment
+        // and representation are target facts, so no user declaration can
+        // define it field by field; the one spelling names the interned type.
+        if (type->name == "va_list") {
+            return TypeRef{ctx_.vaList()};
+        }
     }
     const Decl* decl = lookup(home, type->name);
     if (decl == nullptr) {

@@ -1,0 +1,16 @@
+// std.varargs - C variadic argument access.
+//
+// VaList is compiler-owned. These declarations are recognized by the
+// compiler and replaced with target ABI operations; no Cider body exists.
+
+export type VaList = va_list;
+
+extern func va_start(ap: *VaList) -> void;
+extern func va_copy(dst: *VaList, src: *VaList) -> void;
+extern func va_end(ap: *VaList) -> void;
+
+extern func va_arg_i32(ap: *VaList) -> i32;
+extern func va_arg_i64(ap: *VaList) -> i64;
+extern func va_arg_u64(ap: *VaList) -> u64;
+extern func va_arg_f64(ap: *VaList) -> f64;
+extern func va_arg_ptr(ap: *VaList) -> *void;

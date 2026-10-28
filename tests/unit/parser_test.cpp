@@ -697,6 +697,32 @@ void testVariadicSyntax() {
     ok = false;
     parse("var f: func(int, ...) -> int;", ok);
     check(!ok, "closures cannot be variadic");
+
+    // Task 1 review addenda: the extern's record, the non-variadic default,
+    // operator rejection, and the `new` bypass of the closure rejection.
+    const auto& ext = static_cast<const cider::ExternFunc&>(*program->decls[0]);
+    check(ext.variadic, "an extern declaration records ...");
+    ok = false;
+    auto plain = parse(
+        "extern func puts(s: *char) -> int;\n"
+        "func g(n: int) -> int { return n; }\n",
+        ok);
+    check(ok, "plain declarations parse");
+    if (ok) {
+        const auto& pext = static_cast<const cider::ExternFunc&>(*plain->decls[0]);
+        const auto& pfn = static_cast<const cider::FuncDecl&>(*plain->decls[1]);
+        check(!pext.variadic && !pfn.variadic,
+              "a non-variadic declaration defaults to false");
+    }
+    ok = false;
+    parse("func operator+(a: int, ...) -> int { return a; }", ok);
+    check(!ok, "operators cannot be variadic");
+    // `new` reaches the type through parsePrimaryType, which does not know the
+    // `*` depth, so the closure rule is applied there; a variadic function
+    // type never reaches the tree as a closure value.
+    ok = false;
+    parse("func f() -> void { new func(int, ...)(); }\n", ok);
+    check(!ok, "new cannot produce a variadic closure type");
 }
 
 int main() {

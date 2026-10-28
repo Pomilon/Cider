@@ -83,6 +83,8 @@ void testKinds() {
           "nominal Struct is Struct");
     check(ctx.nominal(cider::Kind::Class, cider::DeclId{})->kind() == cider::Kind::Class,
           "nominal Class is Class");
+    check(ctx.vaList()->kind() == cider::Kind::VaList, "vaList is VaList");
+    check(ctx.vaList() == ctx.vaList(), "va_list interns to one pointer");
     cider::Signature sig({}, i32, cider::Abi::SysV);
     check(ctx.functionPtr(sig)->kind() == cider::Kind::FunctionPtr, "functionPtr is FunctionPtr");
     check(ctx.closure(sig)->kind() == cider::Kind::Closure, "closure is Closure");
@@ -159,6 +161,7 @@ void testNames() {
     check(cider::typeName(cider::TypeRef{ctx.array(u8, 5)}) == "[u8; 5]", "[u8; 5]");
     check(cider::typeName(cider::TypeRef{ctx.void_()}) == "void", "void");
     check(cider::typeName(cider::TypeRef{ctx.string()}) == "string", "string is string");
+    check(cider::typeName(cider::TypeRef{ctx.vaList()}) == "va_list", "va_list is va_list");
     check(cider::typeName(cider::TypeRef{ctx.basic(cider::BasicKind::F64)}) == "f64", "f64");
     check(cider::typeName(cider::errorRef()) == "error", "poison names itself");
     const cider::Type* t0 = ctx.typeParam(cider::DeclId{0, 3}, 0);
@@ -189,6 +192,8 @@ void testLayout() {
     check(cider::typeSize(ctx.array(ctx.basic(cider::BasicKind::U8), 5)) == 5, "[u8; 5] is 5");
     check(cider::typeSize(ctx.void_()) == 0, "void occupies nothing");
     check(cider::typeSize(ctx.string()) == 16, "string is 16");
+    check(cider::typeSize(ctx.vaList()) == 24, "va_list is 24");
+    check(cider::alignOf(ctx.vaList()) == 8, "va_list aligns to 8");
     check(cider::typeSize(ctx.alias(cider::DeclId{})) == -1, "an alias has no size to report");
 }
 
