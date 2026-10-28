@@ -89,7 +89,8 @@ bool isByteWidth(ir::IRType width) {
 // memory for this slice.
 bool isFixedScratchInstruction(const ir::Instr& instr) {
     if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem ||
-        instr.op == ir::Op::Shl || instr.op == ir::Op::Shr) {
+        instr.op == ir::Op::Shl || instr.op == ir::Op::Shr ||
+        instr.op == ir::Op::VaStart || instr.op == ir::Op::VaArg) {
         return true;
     }
     return instr.op == ir::Op::Mul && isByteWidth(instr.width);
@@ -101,7 +102,8 @@ bool isFixedScratchInstruction(const ir::Instr& instr) {
 // callee-saved home can carry them.
 bool isBarrier(const ir::Instr& instr) {
     if (instr.op == ir::Op::Call || instr.op == ir::Op::Asm ||
-        instr.op == ir::Op::Trap) {
+        instr.op == ir::Op::Trap || instr.op == ir::Op::VaStart ||
+        instr.op == ir::Op::VaArg) {
         return true;
     }
     return (instr.op == ir::Op::Load || instr.op == ir::Op::Store) &&

@@ -205,6 +205,24 @@ public:
     std::vector<ir::Value> callSretLoads(const std::vector<ir::Value>& slots,
                                          const Type* ret, Position pos);
     std::vector<ir::Value> lowerCallWords(Call& n);
+    // VARIADICS.md §5-6: the std.varargs entries have compiler-supplied
+    // bodies, so each lowers to the IR form its target reads. VaStart carries
+    // the enclosing signature's named GP/SSE counts; VaArg reads one value of
+    // the requested width; VaCopy copies the whole cursor; VaEnd is a no-op.
+    std::vector<ir::Value> lowerVaStart(Call& n);
+    std::vector<ir::Value> lowerVaArg(Call& n, BasicKind kind);
+    std::vector<ir::Value> lowerVaArg(Call& n, bool pointer);
+    std::vector<ir::Value> lowerVaCopy(Call& n);
+    // One VaArg instruction for an already-decided result shape: the two
+    // spelling-based overloads above are the only callers, so the operand
+    // rule and result count live in one place.
+    std::vector<ir::Value> lowerVaArgWords(Call& n, TypeRef type,
+                                           ir::IRType width);
+    // How many named parameters the SysV caller placed in integer registers
+    // and in SSE registers. One rule shared by VaStart's two counts, so the
+    // two numbers can never disagree about where the named arguments ended.
+    uint32_t namedGpWords(const Signature& sig);
+    uint32_t namedSseRegs(const Signature& sig);
     // A binary node the checker resolved to a free operator declaration is
     // emitted as an ordinary call. The operands are moved into a synthetic
     // Call and moved back afterwards so the AST keeps owning them.
@@ -740,6 +758,11 @@ private:
     bool checks_ = false;
     std::unique_ptr<ir::Module> module_;
     ir::Function* function_ = nullptr;
+    // The source signature of the body being lowered, without any hidden sret
+    // parameter: va_start's named-argument counts describe the caller's view
+    // of the declaration, never the frame's compiler-added word.
+    // VARIADICS.md §6.
+    const Signature* currentSignature_ = nullptr;
     bool enabled_ = false;
     bool wrap_ = false;
     bool failed_ = false;

@@ -1915,6 +1915,8 @@ struct Runner {
             case Op::FRem:
             case Op::Extract:
             case Op::Insert:
+            case Op::VaStart:
+            case Op::VaArg:
                 return refuse(instr.loc,
                               std::string("vm cannot run ") + opName(instr.op) + " yet");
             case Op::Asm:

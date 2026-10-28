@@ -675,6 +675,14 @@ bool eligibleCall(const std::vector<ir::Function>& callees,
         // slice from having to prove the ABI row is irrelevant.
         return false;
     }
+    if (call.call.variadic) {
+        // A variadic callee is entered with the caller's `al` count and, when
+        // it defines one, the enclosing function's saved argument state that
+        // `va_start` names. Cloning its body into an ordinary caller would
+        // leave that state behind — and the tail arguments have no parameters
+        // to receive them. Keep the call (VARIADICS.md §6).
+        return false;
+    }
     // Every callee block must be reachable: the clone's phis would otherwise
     // land in an unreachable region and the structural checker refuses them.
     const DominatorInfo doms = computeDominators(*callee);

@@ -43,6 +43,32 @@ struct Piped {
     cider::opt::OptResult opt;
 };
 
+// modules/std/varargs.cid, embedded: a pipeline test imports the public
+// surface without depending on a working directory (VARIADICS.md §5).
+const char* kVarargsSource =
+    "export type VaList = va_list;\n"
+    "\n"
+    "extern func va_start(ap: *VaList) -> void;\n"
+    "extern func va_copy(dst: *VaList, src: *VaList) -> void;\n"
+    "extern func va_end(ap: *VaList) -> void;\n"
+    "\n"
+    "extern func va_arg_i32(ap: *VaList) -> i32;\n"
+    "extern func va_arg_i64(ap: *VaList) -> i64;\n"
+    "extern func va_arg_u64(ap: *VaList) -> u64;\n"
+    "extern func va_arg_f64(ap: *VaList) -> f64;\n"
+    "extern func va_arg_ptr(ap: *VaList) -> *void;\n";
+
+cider::resolve::Resolver::ModuleLoader varargsLoader() {
+    return [](const std::string& name) -> std::unique_ptr<cider::Program> {
+        if (name != "std.varargs") {
+            return nullptr;
+        }
+        cider::Lexer lexer("varargs.cid", kVarargsSource);
+        cider::Parser parser("varargs.cid", lexer.lex());
+        return parser.parse();
+    };
+}
+
 Piped pipe(const std::string& text) {
     Piped out;
     out.types = std::make_unique<cider::TypeContext>();
@@ -58,7 +84,8 @@ Piped pipe(const std::string& text) {
         out.stage = "parse";
         return out;
     }
-    auto resolver = std::make_unique<cider::resolve::Resolver>(*out.types);
+    auto resolver = std::make_unique<cider::resolve::Resolver>(*out.types,
+                                                               varargsLoader());
     if (!resolver->resolveProgram(*program, "main")) {
         out.stage = "resolve";
         return out;
@@ -1371,6 +1398,66 @@ void testPhiStructureErrors() {
           "a phi in the entry block is refused");
 }
 
+// VARIADICS.md §8:VaStart takes one `*va_list` and answers nothing; VaArg
+// takes one `*va_list` and answers exactly one non-void value. The shapes are
+// checked before any pass runs, so a malformed lowering never reaches codegen.
+void testVaOperationStructure() {
+    std::printf("the structural checker validates va operations\n");
+    struct Shape {
+        bool startResult = false;
+        bool startBadOperand = false;
+        bool argNoResult = false;
+        bool argVoidWidth = false;
+        bool argBadOperand = false;
+    };
+    auto validate = [](Shape shape) {
+        Ir ir;
+        cider::TypeRef t = ir.i32();
+        cider::TypeRef p = ir.ptr();
+        ir.emit(ir.constant(10, 0, cider::ir::IRType::Ptr, p));
+        cider::ir::Instr start;
+        start.op = cider::ir::Op::VaStart;
+        start.operands.push_back(ir.value(10, cider::ir::IRType::Ptr, p));
+        if (shape.startBadOperand) {
+            start.operands.push_back(ir.value(10, cider::ir::IRType::Ptr, p));
+        }
+        if (shape.startResult) {
+            start.results.push_back(
+                ir.value(12, cider::ir::IRType::I32, t));
+        }
+        ir.emit(start);
+        cider::ir::Instr read;
+        read.op = cider::ir::Op::VaArg;
+        read.width = shape.argVoidWidth ? cider::ir::IRType::Void
+                                        : cider::ir::IRType::I32;
+        read.type = t;
+        read.operands.push_back(ir.value(10, cider::ir::IRType::Ptr, p));
+        if (shape.argBadOperand) {
+            read.operands.push_back(
+                ir.value(10, cider::ir::IRType::Ptr, p));
+        }
+        if (!shape.argNoResult) {
+            read.results.push_back(
+                ir.value(11, read.width, t));
+        }
+        ir.emit(read);
+        ir.finishRet(0, shape.argNoResult ? 12 : 11,
+                     cider::ir::IRType::I32, t);
+        return cider::opt::checkModule(ir.module);
+    };
+    check(validate(Shape{}).empty(), "a well-formed va_start/va_arg passes");
+    check(!validate(Shape{.startResult = true}).empty(),
+          "va_start with a result is refused");
+    check(!validate(Shape{.startBadOperand = true}).empty(),
+          "va_start needs exactly one pointer operand");
+    check(!validate(Shape{.argNoResult = true}).empty(),
+          "va_arg without a result is refused");
+    check(!validate(Shape{.argVoidWidth = true}).empty(),
+          "va_arg with a void width is refused");
+    check(!validate(Shape{.argBadOperand = true}).empty(),
+          "va_arg needs exactly one pointer operand");
+}
+
 // Phi lowering removes phis and leaves ordinary copies; a critical edge gets
 // a dedicated edge block first.
 void testPhiLowering() {
@@ -1632,6 +1719,65 @@ void testDisplacementEscapes() {
 
 }  // namespace
 
+// VARIADICS.md §8: the va operations are opaque to the optimiser. VaCopy's
+// word stores initialize a cursor no Load reads, and a variadic callee must
+// stay a call: cloning one would leave va_start's saved argument state behind.
+void testVariadicPipeline() {
+    std::printf("variadic IR survives the optimiser\n");
+    Piped r = pipe(
+        "from std.varargs import VaList, va_start, va_copy, va_arg_i32, va_end;\n"
+        "func sum(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; var copy: VaList = uninit;\n"
+        "  va_start(&ap); va_copy(&copy, &ap);\n"
+        "  var v: i32 = va_arg_i32(&copy);\n"
+        "  va_end(&ap); va_end(&copy); return n + v;\n"
+        "}\n"
+        "func tag(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap); va_end(&ap); return n;\n"
+        "}\n"
+        "func main() -> int { return sum(1) + tag(2); }\n");
+    check(r.ok, "the variadic program optimises: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    const cider::ir::Function* sum = nullptr;
+    for (const cider::ir::Function& fn : r.module->functions) {
+        if (fn.name == "sum") {
+            sum = &fn;
+        }
+    }
+    check(sum != nullptr, "the variadic callee survives");
+    check(sum != nullptr &&
+              countOp(*sum, cider::ir::Op::VaStart) == 1 &&
+              countOp(*sum, cider::ir::Op::VaArg) == 1,
+          "va_start and va_arg survive");
+    check(sum != nullptr && countOp(*sum, cider::ir::Op::Load) >= 3 &&
+              countOp(*sum, cider::ir::Op::Store) >= 3,
+          "va_copy's cursor stores are not dead");
+    const cider::ir::Function* main = nullptr;
+    for (const cider::ir::Function& fn : r.module->functions) {
+        if (fn.name == "main") {
+            main = &fn;
+        }
+    }
+    check(main != nullptr && countOp(*main, cider::ir::Op::Call) >= 1,
+          "a variadic call is not inlined (inline count " +
+              std::to_string(r.opt.inlined) + ")");
+    bool tagCall = false;
+    if (main != nullptr) {
+        for (const cider::ir::Block& block : main->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call && instr.callee == "tag") {
+                    tagCall = true;
+                }
+            }
+        }
+    }
+    check(tagCall, "the small variadic callee stays a call");
+    check(main != nullptr && countOp(*main, cider::ir::Op::VaStart) == 0,
+          "no saved-argument state leaks into the caller");
+}
+
 int main() {
     std::printf("opt_test — malformed IR is refused, passes preserve meaning\n\n");
     testWellFormed();
@@ -1667,6 +1813,8 @@ int main() {
     testMem2RegMismatched();
     testPhiStructureValid();
     testPhiStructureErrors();
+    testVaOperationStructure();
+    testVariadicPipeline();
     testPhiLowering();
     testRodataDedup();
     testRodataDedupPinsAssembly();

@@ -110,6 +110,8 @@ const char* opName(Op op) {
         case Op::Insert: return "insert";
         case Op::Gep: return "gep";
         case Op::Call: return "call";
+        case Op::VaStart: return "va_start";
+        case Op::VaArg: return "va_arg";
         case Op::Cast: return "cast";
         case Op::Trap: return "trap";
         case Op::Asm: return "asm";

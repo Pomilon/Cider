@@ -37,6 +37,7 @@ namespace opt {
 namespace {
 
 constexpr uint64_t kOneResult = 1;
+constexpr uint64_t kOneOperand = 1;
 
 bool namesBase(ir::Op op) {
     return op == ir::Op::Load || op == ir::Op::Store ||
@@ -220,6 +221,48 @@ void checkInstructionUses(const ir::Function& fn, const Definitions& defs,
     }
 }
 
+// VARIADICS.md §8: the two va operations have one legal shape each, and a
+// malformed one is a lowering bug that the target would otherwise read as
+// plausible bytes. VaStart initializes a cursor and answers nothing; VaArg
+// reads one value, so it names exactly one result at a non-void width. Both
+// take their `*va_list` in `operands`, which is also what keeps the address's
+// definition dominating the use (checkInstructionUses above walks it).
+void checkVaOperations(const ir::Function& fn,
+                       std::vector<StructuralError>& errors) {
+    for (const ir::Block& block : fn.blocks) {
+        for (const ir::Instr& instr : block.body) {
+            if (instr.op != ir::Op::VaStart && instr.op != ir::Op::VaArg) {
+                continue;
+            }
+            const std::string name = ir::opName(instr.op);
+            if (instr.operands.size() != kOneOperand ||
+                instr.operands[0].width != ir::IRType::Ptr) {
+                errors.push_back(StructuralError{
+                    fn.name, block.label,
+                    name + " needs exactly one pointer operand"});
+            }
+            if (instr.op == ir::Op::VaStart) {
+                if (!instr.results.empty()) {
+                    errors.push_back(StructuralError{
+                        fn.name, block.label, "va_start has no result"});
+                }
+                continue;
+            }
+            if (instr.results.size() != kOneResult) {
+                errors.push_back(StructuralError{
+                    fn.name, block.label, "va_arg needs exactly one result"});
+                continue;
+            }
+            if (instr.width == ir::IRType::Void ||
+                instr.results[0].width != instr.width) {
+                errors.push_back(StructuralError{
+                    fn.name, block.label,
+                    "va_arg needs a non-void result width"});
+            }
+        }
+    }
+}
+
 void checkPhis(const ir::Function& fn, const Definitions& defs,
                const DominatorInfo& dominators,
                std::vector<StructuralError>& errors) {
@@ -337,6 +380,7 @@ std::vector<StructuralError> checkModule(const ir::Module& module) {
         checkTerminated(fn, errors);
         const DominatorInfo dominators = computeDominators(fn);
         checkDefs(fn, dominators, errors);
+        checkVaOperations(fn, errors);
     }
     return errors;
 }

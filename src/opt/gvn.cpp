@@ -117,6 +117,8 @@ bool allowedOp(ir::Op op) {
         case ir::Op::Extract:
         case ir::Op::Insert:
         case ir::Op::Call:
+        case ir::Op::VaStart:
+        case ir::Op::VaArg:
         case ir::Op::Cast:
         case ir::Op::Trap:
         case ir::Op::Asm:

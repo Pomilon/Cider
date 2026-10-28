@@ -47,8 +47,35 @@ struct Lowered {
     std::unique_ptr<cider::ir::Module> module;
 };
 
+// modules/std/varargs.cid, embedded: the lowering tests import the public
+// surface without depending on a working directory (VARIADICS.md §5).
+const char* kVarargsSource =
+    "export type VaList = va_list;\n"
+    "\n"
+    "extern func va_start(ap: *VaList) -> void;\n"
+    "extern func va_copy(dst: *VaList, src: *VaList) -> void;\n"
+    "extern func va_end(ap: *VaList) -> void;\n"
+    "\n"
+    "extern func va_arg_i32(ap: *VaList) -> i32;\n"
+    "extern func va_arg_i64(ap: *VaList) -> i64;\n"
+    "extern func va_arg_u64(ap: *VaList) -> u64;\n"
+    "extern func va_arg_f64(ap: *VaList) -> f64;\n"
+    "extern func va_arg_ptr(ap: *VaList) -> *void;\n";
+
+cider::resolve::Resolver::ModuleLoader varargsLoader() {
+    return [](const std::string& name) -> std::unique_ptr<cider::Program> {
+        if (name != "std.varargs") {
+            return nullptr;
+        }
+        cider::Lexer lexer("varargs.cid", kVarargsSource);
+        cider::Parser parser("varargs.cid", lexer.lex());
+        return parser.parse();
+    };
+}
+
 Lowered lowerAs(const std::string& text, cider::target::Kind target,
-                bool checks = false, bool allocationFixture = true) {
+                bool checks = false, bool allocationFixture = true,
+                cider::resolve::Resolver::ModuleLoader loader = nullptr) {
     Lowered out;
     out.types = std::make_unique<cider::TypeContext>();
     const std::string source =
@@ -65,7 +92,8 @@ Lowered lowerAs(const std::string& text, cider::target::Kind target,
         out.stage = "parse";
         return out;
     }
-    out.resolver = std::make_unique<cider::resolve::Resolver>(*out.types, nullptr, target);
+    out.resolver = std::make_unique<cider::resolve::Resolver>(*out.types, loader,
+                                                              target);
     if (!out.resolver->resolveProgram(*out.program, "main")) {
         out.stage = "resolve";
         return out;
@@ -88,11 +116,13 @@ Lowered lowerAs(const std::string& text, cider::target::Kind target,
 }
 
 Lowered lower(const std::string& text) {
-    return lowerAs(text, cider::target::Kind::Native);
+    return lowerAs(text, cider::target::Kind::Native, false, true,
+                   varargsLoader());
 }
 
 Lowered lowerChecks(const std::string& text) {
-    return lowerAs(text, cider::target::Kind::Native, true);
+    return lowerAs(text, cider::target::Kind::Native, true, true,
+                   varargsLoader());
 }
 
 
@@ -1979,6 +2009,168 @@ void testLocalAggregates() {
     check(out.ok, "a local class lowers: " + out.stage);
 }
 
+void testVariadicLowering() {
+    std::printf("variadic lowering\n");
+    Lowered r = lower(
+        "from std.varargs import VaList, va_start, va_arg_i32, va_end;\n"
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func count(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap);\n"
+        "  var v: i32 = va_arg_i32(&ap); va_end(&ap); return n + v;\n"
+        "}\n"
+        "func main() -> int { return sink(\"x\", 1 as i8) + count(1, 2 as i16); }\n");
+    check(r.ok, "variadic program lowers: " + r.stage);
+    if (!r.ok) { return; }
+    const auto* main = find(r.module.get(), "main");
+    bool callFlag = false;
+    for (const auto& block : main->blocks) {
+        for (const auto& instr : block.body) {
+            if (instr.op == cider::ir::Op::Call && instr.call.variadic) {
+                callFlag = true;
+            }
+        }
+    }
+    check(callFlag, "a variadic call is marked");
+    const auto* count = find(r.module.get(), "count");
+    check(countOp(*count, cider::ir::Op::VaStart) == 1, "va_start lowers");
+    check(countOp(*count, cider::ir::Op::VaArg) == 1, "va_arg lowers");
+}
+
+void testVariadicPromotionsAndCounts() {
+    std::printf("variadic promotions and named counts\n");
+    Lowered r = lower(
+        "from std.varargs import VaList, va_start, va_end;\n"
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func count(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap); va_end(&ap); return n;\n"
+        "}\n"
+        "func mix(a: int, b: f64, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap); va_end(&ap); return a;\n"
+        "}\n"
+        "func main() -> int {\n"
+        "  return sink(\"x\", 1 as i8, 1 as i16, 1.5 as f32, 2.5 as f64, nilPtr)\n"
+        "       + count(1) + mix(1, 2.0);\n"
+        "}\n");
+    check(r.ok, "promoted variadic program lowers: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    const auto* main = find(r.module.get(), "main");
+    const cider::ir::Instr* sink = nullptr;
+    if (main != nullptr) {
+        for (const auto& block : main->blocks) {
+            for (const auto& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call && instr.callee == "sink") {
+                    sink = &instr;
+                }
+            }
+        }
+    }
+    check(sink != nullptr, "the variadic extern call is emitted");
+    if (sink != nullptr) {
+        const std::vector<cider::ir::Argument>& args = sink->arguments;
+        check(args.size() == 6, "every argument reaches the call");
+        check(args.size() == 6 &&
+                  args[1].words.size() == 1 &&
+                  args[1].words[0].width == cider::ir::IRType::I32 &&
+                  args[2].words[0].width == cider::ir::IRType::I32,
+              "i8 and i16 promote to i32 words");
+        check(args.size() == 6 &&
+                  args[3].words[0].width == cider::ir::IRType::F64 &&
+                  args[4].words[0].width == cider::ir::IRType::F64,
+              "f32 promotes to f64");
+        check(args.size() == 6 &&
+                  args[3].width == cider::ir::IRType::F64 &&
+                  args[4].width == cider::ir::IRType::F64,
+              "promoted floats stay in the SSE class");
+        check(args.size() == 6 &&
+                  args[5].words[0].width == cider::ir::IRType::Ptr,
+              "a pointer passes unchanged");
+    }
+    auto vaStartOf = [&](const char* name) -> const cider::ir::Instr* {
+        const auto* fn = find(r.module.get(), name);
+        if (fn == nullptr) {
+            return nullptr;
+        }
+        for (const auto& block : fn->blocks) {
+            for (const auto& instr : block.body) {
+                if (instr.op == cider::ir::Op::VaStart) {
+                    return &instr;
+                }
+            }
+        }
+        return nullptr;
+    };
+    const cider::ir::Instr* ints = vaStartOf("count");
+    check(ints != nullptr && ints->vaNamedGp == 1 && ints->vaNamedSse == 0,
+          "one named integer parameter counts one GP word");
+    const cider::ir::Instr* mixed = vaStartOf("mix");
+    check(mixed != nullptr && mixed->vaNamedGp == 1 && mixed->vaNamedSse == 1,
+          "a named f64 counts one SSE register and no GP word");
+
+    Lowered ms = lower(
+        "msabi extern func msink(fmt: *char, ...) -> int;\n"
+        "func main() -> int { return msink(\"x\", 1); }\n");
+    check(ms.ok, "an msabi variadic call lowers: " + ms.stage);
+    const auto* msMain = find(ms.module.get(), "main");
+    bool marked = false;
+    if (msMain != nullptr) {
+        for (const auto& block : msMain->blocks) {
+            for (const auto& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call && instr.callee == "msink") {
+                    marked = instr.call.variadic && instr.call.msabi;
+                }
+            }
+        }
+    }
+    check(marked, "the msabi call carries both bits");
+}
+
+void testVaArgWidthsAndCopy() {
+    std::printf("va_arg widths and va_copy\n");
+    Lowered r = lower(
+        "from std.varargs import VaList, va_start, va_arg_i32, va_arg_i64,\n"
+        "    va_arg_u64, va_arg_f64, va_arg_ptr, va_copy, va_end;\n"
+        "func f(n: int, ...) -> i64 {\n"
+        "  var ap: VaList = uninit; var other: VaList = uninit;\n"
+        "  va_start(&ap);\n"
+        "  var a: i32 = va_arg_i32(&ap);\n"
+        "  var b: i64 = va_arg_i64(&ap);\n"
+        "  var c: u64 = va_arg_u64(&ap);\n"
+        "  var d: f64 = va_arg_f64(&ap);\n"
+        "  var p: *void = va_arg_ptr(&ap);\n"
+        "  va_copy(&other, &ap);\n"
+        "  va_end(&ap); va_end(&other);\n"
+        "  return b;\n"
+        "}\n");
+    check(r.ok, "every va_arg entry lowers: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    const auto* fn = find(r.module.get(), "f");
+    std::vector<cider::ir::IRType> widths;
+    for (const auto& block : fn->blocks) {
+        for (const auto& instr : block.body) {
+            if (instr.op == cider::ir::Op::VaArg) {
+                widths.push_back(instr.width);
+            }
+        }
+    }
+    check(widths.size() == 5, "one VaArg per typed read");
+    check(widths.size() == 5 &&
+              widths[0] == cider::ir::IRType::I32 &&
+              widths[1] == cider::ir::IRType::I64 &&
+              widths[2] == cider::ir::IRType::U64 &&
+              widths[3] == cider::ir::IRType::F64 &&
+              widths[4] == cider::ir::IRType::Ptr,
+          "each VaArg carries its entry's width");
+    check(countOp(*fn, cider::ir::Op::Load) >= 3 &&
+              countOp(*fn, cider::ir::Op::Store) >= 3,
+          "va_copy copies the whole cursor by words");
+    check(countOp(*fn, cider::ir::Op::Call) == 0,
+          "va_end emits nothing");
+}
+
 int main() {
     std::printf("lower_test — source becomes IR\n\n");
     testUefiEntry();
@@ -1987,6 +2179,9 @@ int main() {
     testExternVar();
     testModuleAsm();
     testLocalAggregates();
+    testVariadicLowering();
+    testVariadicPromotionsAndCounts();
+    testVaArgWidthsAndCopy();
     testGlobal();
     testArithmetic();
     testTrapFlag();

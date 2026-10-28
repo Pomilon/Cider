@@ -106,7 +106,7 @@ enum class Op {
     Cmp,
     Load, Store, Alloca, DataAddr, FnAddr,
     Extract, Insert, Gep,
-    Call, Cast, Trap, Asm,
+    Call, VaStart, VaArg, Cast, Trap, Asm,
 };
 
 const char* opName(Op op);
@@ -117,6 +117,10 @@ struct CallInfo {
     // the matching argument row and shadow space. Set by the lowerer from the
     // resolved signature; the VM reads words, not registers, and ignores it.
     bool msabi = false;
+    // VARIADICS.md §8: the callee takes a C variadic tail. The code generator
+    // emits SysV's `al` count (or Microsoft's duplicated floating homes)
+    // from this bit without re-resolving the signature it never sees.
+    bool variadic = false;
 };
 
 // One argument of a call. Its own type rather than signature.h's Parameter,
@@ -185,6 +189,12 @@ struct Instr {
     Value calleeValue;               // Call: indirect
     std::vector<Argument> arguments; // Call
     CallInfo call;                   // Call
+    // VaStart: how many of the enclosing variadic function's named parameters
+    // arrived in integer and SSE registers. The SysV va_list cursor starts at
+    // the first unnamed slot of each class (VARIADICS.md §6); the counts ride
+    // on the instruction so the target never re-walks the signature.
+    uint32_t vaNamedGp = 0;
+    uint32_t vaNamedSse = 0;
     TrapReason reason = TrapReason::Explicit;  // Trap
     std::string asmText;             // Asm
     std::vector<std::string> asmNames;

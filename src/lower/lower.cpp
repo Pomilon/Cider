@@ -14,6 +14,7 @@
 #include "ast/operator.h"
 #include "layout.h"
 #include "types/context.h"
+#include "types/variadic.h"
 
 namespace cider {
 namespace lower {
@@ -2416,6 +2417,10 @@ void Lowerer::beginFuncFrame(const std::string& link, const Signature& sig,
     function_ = &fn;
     module_->functions.push_back(std::move(fn));
     function_ = &module_->functions.back();
+    // The source declaration's shape, before the hidden sret word above:
+    // va_start counts the caller's named parameters, not the frame's
+    // compiler-added ones (VARIADICS.md §6).
+    currentSignature_ = &sig;
 
     valueSeq_ = 0;
     labelSeq_ = 0;
@@ -2499,6 +2504,7 @@ void Lowerer::endFuncFrame(Position pos) {
         refuse(pos, "this function may fall off without returning");
     }
     function_ = nullptr;
+    currentSignature_ = nullptr;
 }
 
 void Lowerer::onSpecFunc(DeclId spec, const FuncDecl& spelling,
@@ -2630,6 +2636,11 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     std::vector<uint64_t> savedMarks = std::move(scopeMarks_);
     uint32_t savedCurrent = current_;
     bool savedTerminated = terminated_;
+    // A method is never variadic: its body has no saved argument state, so
+    // lowering `va_start` here would have nothing to describe. The checker
+    // rejects it first; the null signature makes a lowerer bug loud.
+    const Signature* savedSignature = currentSignature_;
+    currentSignature_ = nullptr;
     auto restoreOuter = [&]() {
         function_ = savedFn >= 0
                         ? &module_->functions[static_cast<size_t>(savedFn)]
@@ -2641,6 +2652,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         scopeMarks_ = std::move(savedMarks);
         current_ = savedCurrent;
         terminated_ = savedTerminated;
+        currentSignature_ = savedSignature;
     };
     // One function per method, statically dispatched: the mangled name is
     // the link identity and the receiver rides as the first parameter, so a
@@ -2806,6 +2818,10 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
         std::move(locals_);
     uint32_t savedCurrent = current_;
     bool savedTerminated = terminated_;
+    // A closure is never variadic (VARIADICS.md §2), so its body has no saved
+    // argument state for va_start; the checker rejects one first.
+    const Signature* savedSignature = currentSignature_;
+    currentSignature_ = nullptr;
 
     ir::Function fn;
     fn.name = hidden;
@@ -2958,6 +2974,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
     locals_ = std::move(savedLocals);
     current_ = savedCurrent;
     terminated_ = savedTerminated;
+    currentSignature_ = savedSignature;
 }
 
 void Lowerer::onBlockEnter(Block& n) {
@@ -9651,12 +9668,206 @@ std::vector<ir::Value> Lowerer::lowerOperatorAssign(Assign& n) {
     return words;
 }
 
+uint32_t Lowerer::namedGpWords(const Signature& sig) {
+    // The SysV classification VARIADICS.md §6 states: a floating named
+    // parameter takes one SSE register and no integer word; every other
+    // named parameter takes as many integer words as its value occupies.
+    // `wordCount` is the layer's one answer for the second half, so a string
+    // or other two-word named parameter is counted, not guessed at.
+    uint32_t words = 0;
+    for (const Parameter& parameter : sig.parameters()) {
+        TypeRef type{parameter.type};
+        if (type.isError()) {
+            continue;
+        }
+        if (type.type->kind() == Kind::Basic &&
+            basicIsFloat(*type.type->basic())) {
+            continue;
+        }
+        int count = wordCount(type);
+        words += count < 0 ? static_cast<uint32_t>(kOneWord)
+                           : static_cast<uint32_t>(count);
+    }
+    return words;
+}
+
+uint32_t Lowerer::namedSseRegs(const Signature& sig) {
+    uint32_t regs = 0;
+    for (const Parameter& parameter : sig.parameters()) {
+        TypeRef type{parameter.type};
+        if (!type.isError() && type.type->kind() == Kind::Basic &&
+            basicIsFloat(*type.type->basic())) {
+            ++regs;
+        }
+    }
+    return regs;
+}
+
+std::vector<ir::Value> Lowerer::lowerVaStart(Call& n) {
+    // `va_start(&ap)` initializes the cursor from the enclosing function's
+    // saved argument state: the named counts ride on the instruction, and
+    // the target derives the register-save and overflow bases (VARIADICS.md
+    // §6-7). The checker already proved there is a variadic context; a
+    // missing signature here is a lowerer bug and refuses loudly.
+    if (currentSignature_ == nullptr || !currentSignature_->variadic()) {
+        refuse(n.pos, "va_start is only valid in a variadic function");
+        return {undefined()};
+    }
+    if (n.args.size() != kOneWord) {
+        refuse(n.pos, "this call");
+        return {undefined()};
+    }
+    std::vector<ir::Value> words = lowerWords(n.args[0].get());
+    if (failed_) {
+        return {undefined()};
+    }
+    if (words.size() != kOneWord || words[kFirstWord].width != ir::IRType::Ptr) {
+        refuse(n.pos, "this call");
+        return {undefined()};
+    }
+    ir::Instr instr;
+    instr.op = ir::Op::VaStart;
+    instr.loc = n.pos;
+    instr.operands.push_back(words[kFirstWord]);
+    instr.vaNamedGp = namedGpWords(*currentSignature_);
+    instr.vaNamedSse = namedSseRegs(*currentSignature_);
+    emit(std::move(instr));
+    return {};
+}
+
+std::vector<ir::Value> Lowerer::lowerVaArg(Call& n, BasicKind kind) {
+    TypeRef type{ctx_.basic(kind)};
+    ir::IRType width = widthOf(type, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    return lowerVaArgWords(n, type, width);
+}
+
+std::vector<ir::Value> Lowerer::lowerVaArg(Call& n, bool pointer) {
+    (void)pointer;
+    // `va_arg_ptr` answers `*void`: an untyped address, one machine word. The
+    // source declaration in std.varargs is the authority for that spelling;
+    // this path only carries it into IR.
+    return lowerVaArgWords(n, TypeRef{ctx_.pointer(ctx_.void_())},
+                           ir::IRType::Ptr);
+}
+
+std::vector<ir::Value> Lowerer::lowerVaArgWords(Call& n, TypeRef type,
+                                                ir::IRType width) {
+    if (n.args.size() != kOneWord) {
+        refuse(n.pos, "this call");
+        return {undefined()};
+    }
+    std::vector<ir::Value> words = lowerWords(n.args[0].get());
+    if (failed_) {
+        return {undefined()};
+    }
+    if (words.size() != kOneWord || words[kFirstWord].width != ir::IRType::Ptr) {
+        refuse(n.pos, "this call");
+        return {undefined()};
+    }
+    ir::Instr instr;
+    instr.op = ir::Op::VaArg;
+    instr.loc = n.pos;
+    instr.width = width;
+    instr.type = type;
+    instr.operands.push_back(words[kFirstWord]);
+    ir::Value value = newValue(instr.width, instr.type, n.pos);
+    instr.results.push_back(value);
+    emit(std::move(instr));
+    if (failed_) {
+        return {undefined()};
+    }
+    return {value};
+}
+
+std::vector<ir::Value> Lowerer::lowerVaCopy(Call& n) {
+    // `va_copy(dst, src)` copies the complete cursor. Every supported target
+    // states va_list as bytes the compiler owns (VARIADICS.md §5-7), so one
+    // word-at-a-time copy from src to dst is the whole operation and needs no
+    // new IR form.
+    if (n.args.size() != kTwoWords) {
+        refuse(n.pos, "this call");
+        return {undefined()};
+    }
+    std::vector<ir::Value> dst = lowerWords(n.args[0].get());
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> src = lowerWords(n.args[1].get());
+    if (failed_) {
+        return {undefined()};
+    }
+    if (dst.size() != kOneWord || src.size() != kOneWord ||
+        dst[0].width != ir::IRType::Ptr || src[0].width != ir::IRType::Ptr) {
+        refuse(n.pos, "this call");
+        return {undefined()};
+    }
+    TypeRef word{ctx_.basic(BasicKind::U64)};
+    constexpr uint64_t kCursorWords =
+        static_cast<uint64_t>(layout::kSizeVaList / layout::kSizePointer);
+    for (uint64_t i = 0; i < kCursorWords; ++i) {
+        ir::Instr load;
+        load.op = ir::Op::Load;
+        load.loc = n.pos;
+        load.type = word;
+        load.width = ir::IRType::U64;
+        load.addressBase = src[kFirstWord];
+        load.displacement = static_cast<int64_t>(i) * layout::kSizePointer;
+        load.isPure = true;
+        ir::Value cell = newValue(load.width, word, n.pos);
+        load.results.push_back(cell);
+        emit(std::move(load));
+        if (failed_) {
+            return {undefined()};
+        }
+        ir::Instr store;
+        store.op = ir::Op::Store;
+        store.loc = n.pos;
+        store.type = word;
+        store.addressBase = dst[kFirstWord];
+        store.displacement = static_cast<int64_t>(i) * layout::kSizePointer;
+        store.storedValue = cell;
+        emit(std::move(store));
+        if (failed_) {
+            return {undefined()};
+        }
+    }
+    return {};
+}
+
 std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     if (failed_) {
         return {undefined()};
     }
     if (checker_.isOperatorCall(&n)) {
         return lowerOperatorCall(n);
+    }
+    // VARIADICS.md §5: the std.varargs entries are compiler-supplied. The
+    // checker recorded exactly which entry this call names, so the dispatch is
+    // a table read, never a second name lookup.
+    switch (checker_.intrinsicOf(n)) {
+        case resolve::Intrinsic::None:
+            break;
+        case resolve::Intrinsic::VaStart:
+            return lowerVaStart(n);
+        case resolve::Intrinsic::VaArgI32:
+            return lowerVaArg(n, BasicKind::I32);
+        case resolve::Intrinsic::VaArgI64:
+            return lowerVaArg(n, BasicKind::I64);
+        case resolve::Intrinsic::VaArgU64:
+            return lowerVaArg(n, BasicKind::U64);
+        case resolve::Intrinsic::VaArgF64:
+            return lowerVaArg(n, BasicKind::F64);
+        case resolve::Intrinsic::VaArgPtr:
+            return lowerVaArg(n, true);
+        case resolve::Intrinsic::VaCopy:
+            return lowerVaCopy(n);
+        case resolve::Intrinsic::VaEnd:
+            // Both supported targets define va_end as a no-op: it releases no
+            // resource (VARIADICS.md §5-7).
+            return {};
     }
     // `v.hasI()`: the tag compared to the member's index, answered as one
     // boolean word. The checker proved the shape; the member lookup repeats
@@ -10468,6 +10679,9 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     instr.callee = callee;
     instr.call.indirect = indirect;
     instr.call.msabi = sig->abi() == Abi::MsAbi;
+    // VARIADICS.md §8: the target emits `al` (or duplicated floating homes)
+    // from this bit, so it never re-resolves the signature.
+    instr.call.variadic = sig->variadic();
     if (indirectCallee.has_value()) {
         // Every indirect call goes through here: class vtables, interface
         // method entries, raw function pointers, and closure code words.
@@ -10490,14 +10704,52 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         if (failed_) {
             return {undefined()};
         }
+        const uint64_t named = sig->arity();
+        if (i >= named) {
+            // VARIADICS.md §4: arguments past the named parameters cross the
+            // C variadic tail with the default promotions the checker proved.
+            // Nothing here boxes, adjusts a string, or packs an aggregate:
+            // the tail is scalar-only, so no such shape reaches lowering.
+            if (!sig->variadic()) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            TypeRef given = checker_.typeOf(n.args[i].get());
+            std::optional<TypeRef> promoted =
+                promoteVariadicArgument(given, ctx_);
+            if (given.isError() || !promoted.has_value() ||
+                arg.words.size() != kOneWord) {
+                refuse(n.args[i]->pos, "this variadic argument");
+                return {undefined()};
+            }
+            TypeRef argType = *promoted;
+            bool isFloat = argType.type->kind() == Kind::Basic &&
+                           basicIsFloat(*argType.type->basic());
+            if (isFloat) {
+                // f32 widens to f64: the one float promotion in the table.
+                arg.words[kFirstWord] =
+                    widenFloat(arg.words[kFirstWord], given, argType,
+                               n.args[i]->pos);
+            } else {
+                arg.words[kFirstWord] =
+                    convertInt(arg.words[kFirstWord], given, argType,
+                               n.args[i]->pos);
+            }
+            if (failed_) {
+                return {undefined()};
+            }
+            if (isFloat) {
+                arg.width = *argType.type->basic() == BasicKind::F32
+                                ? ir::IRType::F32
+                                : ir::IRType::F64;
+            }
+            instr.arguments.push_back(std::move(arg));
+            continue;
+        }
         // A concrete argument for an interface parameter boxes to the pair
         // here, so the callee's two words arrive as two. The checker proved
         // the arity, so a parameter miss here is a lowerer bug, not a
         // program, and refuses as one.
-        if (i >= static_cast<uint64_t>(sig->parameters().size())) {
-            refuse(n.pos, "this call");
-            return {undefined()};
-        }
         TypeRef want{sig->parameters()[static_cast<size_t>(i)].type};
         arg.words = adjustStringLitArg(n.args[i].get(), std::move(arg.words), want);
         arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
