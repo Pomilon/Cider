@@ -3436,6 +3436,39 @@ void testVaStartGenericContext() {
     check(!localMethod.ok &&
               hasDiagnostic(localMethod, "only valid in a variadic function"),
           "a local class method does not inherit the caller's variadic context");
+    // The constructor and destructor are walked through their own hook, not
+    // checkMethods, so they need the same guard (VARIADICS.md §2: no method,
+    // constructor or destructor is variadic).
+    Checked localCtor = check(
+        "from std.varargs import VaList, va_start;\n"
+        "func f(n: int, ...) -> int {\n"
+        "  class Local {\n"
+        "    var x: int;\n"
+        "    func init(x: int) -> void {\n"
+        "      var ap: VaList = uninit; va_start(&ap); this->x = x;\n"
+        "    }\n"
+        "  }\n"
+        "  return n;\n"
+        "}\n",
+        varargsLoader());
+    check(!localCtor.ok &&
+              hasDiagnostic(localCtor, "only valid in a variadic function"),
+          "a local constructor does not inherit the caller's variadic context");
+    Checked localDtor = check(
+        "from std.varargs import VaList, va_start;\n"
+        "func f(n: int, ...) -> int {\n"
+        "  class Local {\n"
+        "    var x: int;\n"
+        "    func deinit() {\n"
+        "      var ap: VaList = uninit; va_start(&ap);\n"
+        "    }\n"
+        "  }\n"
+        "  return n;\n"
+        "}\n",
+        varargsLoader());
+    check(!localDtor.ok &&
+              hasDiagnostic(localDtor, "only valid in a variadic function"),
+          "a local destructor does not inherit the caller's variadic context");
 }
 
 // A variadic signature keeps its `...` through function-pointer assignment:

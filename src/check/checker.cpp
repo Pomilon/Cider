@@ -1716,6 +1716,10 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
         const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
         TypeRef savedRet = funcReturn_;
         bool was = inFunc_;
+        // A constructor or destructor is never variadic (VARIADICS.md §2), so
+        // a local class declared inside a variadic function must not lend its
+        // caller's context to va_start here.
+        bool wasVariadic = inVariadicFunction_;
         std::optional<DeclId> savedClass = currentClass_;
         bool wasInit = inInit_;
         // The constructor walks as a method of its class: `self` names the
@@ -1725,6 +1729,7 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
         inInit_ = isInit;
         funcReturn_ = TypeRef{ret};
         inFunc_ = true;
+        inVariadicFunction_ = false;
         if (sink_ != nullptr) {
             const resolve::Decl* owner = resolver_.declById(id);
             std::string name = owner != nullptr ? owner->name : "";
@@ -1735,6 +1740,7 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
         }
         funcReturn_ = savedRet;
         inFunc_ = was;
+        inVariadicFunction_ = wasVariadic;
         currentClass_ = savedClass;
         inInit_ = wasInit;
     }
