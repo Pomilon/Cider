@@ -64,13 +64,12 @@ enum class TokenKind {
     Arrow, FatArrow, ColonColon, Ellipsis, Hash, At,
 };
 
-// One fragment of a string literal. Text parts hold bytes; expression parts
-// hold the tokens between the braces, lexed by the same lexer, so the parser
-// never re-reads the literal's characters to find out what `{e}` means.
+// One fragment of a string literal. Text parts hold bytes. A brace part holds
+// the decoded bytes between `{` and `}`: normal strings put the braces back as
+// literal text, while inline asm reads the inner text as a placeholder name.
 struct StringPart {
     bool isExpr = false;
     std::string text;
-    std::vector<struct Token> expr;
     Position pos;
 };
 

@@ -1745,16 +1745,16 @@ void testMultiWordReturn() {
           "the caller issues one call");
 }
 
-// Interpolation and string concatenation are library operations, not
-// compiler lowering paths.
+// Braces are ordinary string bytes; string concatenation is a library
+// operation, not a compiler lowering path.
 void testInterpRemoved() {
-    std::printf("interpolation and string + are not core\n");
+    std::printf("braces are literal; string + is not core\n");
     Lowered r = lower(
         "func main() -> int {\n"
         "    var v: string = \"ab{12}c\";\n"
         "    return v.len as int;\n"
         "}\n");
-    check(!r.ok && r.stage == "parse", "interpolation is rejected");
+    check(r.ok, "braces are literal bytes");
     Lowered add = lower(
         "func main() -> int {\n"
         "    var s: string = \"he\";\n"

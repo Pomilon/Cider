@@ -124,29 +124,33 @@ void testChars() {
     check(nl.lit.charValue == 10, "newline is 10");
 }
 
-// Interpolation is recorded as parts, not re-parsed later.
+// Brace runs are recorded as parts so asm can name placeholders; ordinary
+// strings reconstruct them as literal bytes.
 void testStrings() {
-    std::printf("strings record their interpolation sites\n");
+    std::printf("strings record their brace runs\n");
     cider::Token s = only(lex("\"text\""), "\"text\"");
     check(s.kind == cider::TokenKind::StringLit, "a string");
     check(s.lit.parts.size() == 1 && !s.lit.parts[0].isExpr, "one text part");
     check(s.lit.parts[0].text == "text", "the bytes");
-    cider::Token interp = only(lex("\"x = {e}\""), "interpolated");
-    check(interp.lit.parts.size() == 2, "text then expression");
+    cider::Token interp = only(lex("\"x = {e}\""), "brace run");
+    check(interp.lit.parts.size() == 2, "text then brace run");
     check(!interp.lit.parts[0].isExpr && interp.lit.parts[0].text == "x = ", "the literal fragment");
-    check(interp.lit.parts[1].isExpr && interp.lit.parts[1].text == "e", "the embedded name");
+    check(interp.lit.parts[1].isExpr && interp.lit.parts[1].text == "e", "the brace run bytes");
+    cider::Token json = only(lex("\"{\\\"id\\\": 1}\""), "json");
+    check(json.lit.parts.size() == 1 && json.lit.parts[0].isExpr, "one brace run");
+    check(json.lit.parts[0].text == "\"id\": 1", "escaped quotes decode inside the run");
     cider::Token esc = only(lex("\"a\\{b\""), "escaped brace");
     check(esc.lit.parts.size() == 1 && esc.lit.parts[0].text == "a{b", "an escaped brace is text");
 }
 
-// FEATURES §1.4: `{{` is a literal brace, a `{` that cannot open an
-// interpolation is literal, and `\xHH` names a byte. Anything else after
-// `\` or an unterminated interpolation is a diagnostic.
+// FEATURES §1.4: `{{` and `}}` spell one brace, a brace run is recorded for
+// asm placeholders, and `\xHH` names a byte. Anything else after `\` is a
+// diagnostic.
 void testBraces() {
     std::printf("braces and hex escapes\n");
     cider::Token doubled = only(lex("\"k1{{k2}}\""), "doubled braces");
     check(doubled.kind == cider::TokenKind::StringLit, "still a string");
-    check(doubled.lit.parts.size() == 1 && !doubled.lit.parts[0].isExpr, "no interpolation");
+    check(doubled.lit.parts.size() == 1 && !doubled.lit.parts[0].isExpr, "no brace run");
     check(doubled.lit.parts[0].text == "k1{k2}", "each pair is one brace");
     cider::Token lone = only(lex("\"{\""), "lone open brace");
     check(lone.kind == cider::TokenKind::StringLit, "still a string");
@@ -156,15 +160,14 @@ void testBraces() {
     check(hex.lit.parts.size() == 1 && hex.lit.parts[0].text == "a{b", "hex names the byte");
     cider::Token badHex = only(lex("\"a\\xq\""), "bad hex escape");
     check(badHex.kind == cider::TokenKind::Error, "a non-hex digit is an error");
-    cider::Token interp = only(lex("\"x = {y}\""), "real interpolation");
-    check(interp.lit.parts.size() == 2 && interp.lit.parts[1].isExpr, "a name still interpolates");
+    cider::Token interp = only(lex("\"x = {y}\""), "brace run");
+    check(interp.lit.parts.size() == 2 && interp.lit.parts[1].isExpr, "a brace run is recorded");
 }
 
 // Wide literals decode to UTF-16 units: `u"AB"` is two units, `\uXXXX`
 // names one raw unit (even a lone surrogate — no pairing, no validation
 // past four hex digits), UTF-8 source encodes, and `{{`/`}}` spell braces.
-// A lone `{` would interpolate, which wide literals do not do, so it is a
-// diagnostic rather than a guess.
+// A lone `{` is an ordinary unit.
 void testWide() {
     std::printf("wide literals decode to units\n");
     cider::Token s = only(lex("u\"AB\""), "u\"AB\"");
@@ -190,10 +193,13 @@ void testWide() {
     check(brace.lit.wideUnits.size() == 4 && brace.lit.wideUnits[1] == '{' &&
               brace.lit.wideUnits[3] == '}',
           "each pair is one brace");
-    cider::Lexer interp("test.cid", "u\"{e}\"");
-    std::vector<cider::Token> iout = interp.lex();
-    check(!interp.errors().empty(), "an interpolation is a diagnostic");
-    check(iout[0].kind == cider::TokenKind::Error, "and an Error token");
+    cider::Lexer braces("test.cid", "u\"{e}\"");
+    std::vector<cider::Token> bout = braces.lex();
+    check(braces.errors().empty(), "a lone brace is not a diagnostic");
+    check(bout[0].kind == cider::TokenKind::WideStringLit, "and stays a wide string");
+    check(bout[0].lit.wideUnits.size() == 3 && bout[0].lit.wideUnits[0] == '{' &&
+              bout[0].lit.wideUnits[1] == 'e' && bout[0].lit.wideUnits[2] == '}',
+          "braces are ordinary units");
     cider::Lexer badEsc("test.cid", "u\"\\q\"");
     badEsc.lex();
     check(!badEsc.errors().empty(), "a bad escape is a diagnostic");

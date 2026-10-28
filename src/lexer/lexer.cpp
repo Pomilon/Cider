@@ -499,32 +499,114 @@ Token Lexer::string() {
         }
         if (c == '{') {
             Position brace{file_, line_, column_};
-            advance();
-            spelling += "{";
-            // FEATURES §1.4: `{{` is a literal brace, and a `{` that cannot
-            // open an interpolation (nothing after it but the closing
-            // quote, a newline, or the file) is literal too — no expression
-            // could start there, so there is nothing to guess about.
-            if (!atEnd() && peek() == '{') {
+            // `{{` spells one literal brace.
+            if (peekAt(1) == '{') {
+                advance();
+                advance();
+                spelling += "{{";
+                text.push_back('{');
+                continue;
+            }
+            // A brace run is one part. Find its matching close in the raw
+            // source, skipping escapes; a quote, newline or end before the
+            // close means this brace was literal after all.
+            uint64_t scan = cursor_ + 1;
+            int depth = 1;
+            uint64_t close = std::string::npos;
+            while (scan < source_.size()) {
+                char s = source_[scan];
+                if (s == '\n' || s == '"') {
+                    break;
+                }
+                if (s == '\\') {
+                    scan += 2;
+                    continue;
+                }
+                if (s == '{') {
+                    ++depth;
+                } else if (s == '}') {
+                    --depth;
+                    if (depth == 0) {
+                        close = scan;
+                        break;
+                    }
+                }
+                ++scan;
+            }
+            if (close == std::string::npos) {
                 advance();
                 spelling += "{";
                 text.push_back('{');
                 continue;
             }
-            if (atEnd() || peek() == '"' || peek() == '\n') {
-                text.push_back('{');
-                continue;
+            advance();  // the `{`
+            spelling += "{";
+            std::string inner;
+            while (cursor_ < close) {
+                char ic = peek();
+                if (ic == '\\') {
+                    advance();
+                    spelling += '\\';
+                    if (atEnd()) {
+                        break;
+                    }
+                    char e = advance();
+                    spelling += e;
+                    if (e == 'x') {
+                        auto hex = [](char h) -> int {
+                            if (h >= '0' && h <= '9') {
+                                return h - '0';
+                            }
+                            if (h >= 'a' && h <= 'f') {
+                                return h - 'a' + 10;
+                            }
+                            if (h >= 'A' && h <= 'F') {
+                                return h - 'A' + 10;
+                            }
+                            return -1;
+                        };
+                        int hi = !atEnd() ? hex(peek()) : -1;
+                        int lo = (hi >= 0 && cursor_ + 1 < source_.size())
+                                     ? hex(source_[cursor_ + 1])
+                                     : -1;
+                        if (hi < 0 || lo < 0) {
+                            token.kind = TokenKind::Error;
+                            fail(brace, "unknown escape");
+                            continue;
+                        }
+                        spelling += peek();
+                        spelling += source_[cursor_ + 1];
+                        advance();
+                        advance();
+                        inner.push_back(
+                            static_cast<char>(hi * 16 + lo));
+                        continue;
+                    }
+                    int escaped = escapeValue(e);
+                    if (escaped < 0) {
+                        token.kind = TokenKind::Error;
+                        fail(brace, "unknown escape");
+                        continue;
+                    }
+                    inner.push_back(static_cast<char>(escaped));
+                    continue;
+                }
+                advance();
+                spelling += ic;
+                inner.push_back(ic);
             }
-            uint64_t inner = cursor_;
-            std::vector<Token> expr = braced(0);
-            std::string innerText = source_.substr(inner, cursor_ - inner - 1);
-            spelling += innerText;
+            if (cursor_ != close) {
+                token.kind = TokenKind::Error;
+                fail(brace, "unterminated string brace");
+                token.text = spelling;
+                return token;
+            }
+            advance();  // the `}`
             spelling += "}";
             flushText(start);
             StringPart part;
             part.isExpr = true;
-            part.text = innerText;
-            part.expr = std::move(expr);
+            part.text = std::move(inner);
             part.pos = brace;
             token.lit.parts.push_back(std::move(part));
             continue;
@@ -691,10 +773,8 @@ Token Lexer::wideString() {
             if (!atEnd() && peek() == '{') {
                 advance();
                 spelling += "{";
-                token.lit.wideUnits.push_back('{');
-                continue;
             }
-            failHere("wide strings do not interpolate");
+            token.lit.wideUnits.push_back('{');
             continue;
         }
         if (c == '}') {
@@ -895,34 +975,6 @@ Token Lexer::wideChar() {
                  "'";
     token.lit.charValue = value;
     return token;
-}
-
-std::vector<Token> Lexer::braced(int depth) {    std::vector<Token> out;
-    for (;;) {
-        skipSpaceAndComments();
-        if (atEnd()) {
-            Position here{file_, line_, column_};
-            fail(here, "unterminated interpolation");
-            return out;
-        }
-        if (peek() == '}' && depth == 0) {
-            advance();
-            return out;
-        }
-        Token token = nextToken();
-        if (token.kind == TokenKind::End) {
-            Position here{file_, line_, column_};
-            fail(here, "unterminated interpolation");
-            return out;
-        }
-        if (token.kind == TokenKind::LBrace) {
-            ++depth;
-        }
-        if (token.kind == TokenKind::RBrace) {
-            --depth;
-        }
-        out.push_back(std::move(token));
-    }
 }
 
 }  // namespace cider

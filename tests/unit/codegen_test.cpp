@@ -748,15 +748,15 @@ void testGlobals() {
           "a const class global reads back");
 }
 
-// Interpolation and string concatenation are library operations, not
-// compiler lowering paths.
+// Braces are ordinary string bytes; string concatenation is a library
+// operation, not a compiler lowering path.
 void testInterpRemoved() {
-    std::printf("interpolation and string + are not core\n");
+    std::printf("braces are literal; string + is not core\n");
     check(runQuiet("func main() -> int {\n"
                    "    var v: string = \"ab{12}c\";\n"
                    "    return v.len as int;\n"
-                   "}\n") == -1,
-          "interpolation is rejected");
+                   "}\n") == 7,
+          "braces are literal bytes");
     check(runQuiet("func main() -> int {\n"
                    "    var s: string = \"he\";\n"
                    "    var t: string = \"llo\";\n"

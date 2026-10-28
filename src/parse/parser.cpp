@@ -2800,12 +2800,11 @@ std::unique_ptr<Expr> Parser::parseFuncLit() {
 std::unique_ptr<Expr> Parser::parseStringParts(const Token& token) {
     std::vector<StringPartAst> parts;
     for (const StringPart& part : token.lit.parts) {
-        if (part.isExpr) {
-            fail(part.pos, "string interpolation is not supported");
-            return nullptr;
-        }
         StringPartAst out;
-        out.text = part.text;
+        // Braces are ordinary string bytes outside asm. The lexer still
+        // records the run separately so `parseAsm` can name placeholders;
+        // here it goes back verbatim, escapes already decoded.
+        out.text = part.isExpr ? "{" + part.text + "}" : part.text;
         parts.push_back(std::move(out));
     }
     return std::make_unique<StringLit>(token.pos, std::move(parts));
