@@ -121,6 +121,10 @@ struct FuncSigType : TypeExpr {
     std::unique_ptr<TypeExpr> returns;
     // 8.4: "msabi"/"sysv"; empty means the platform default (SysV).
     std::string abi;
+    // VARIADICS.md §2: a trailing `...` in the parameter list. Only the
+    // function-pointer spelling may carry it; a bare `func(...)` is a closure
+    // type and the parser refuses the mark there.
+    bool variadic = false;
     FuncSigType(Position p, std::vector<std::unique_ptr<TypeExpr>> ps,
                 std::unique_ptr<TypeExpr> r)
         : TypeExpr(std::move(p)), params(std::move(ps)), returns(std::move(r)) {}
@@ -638,6 +642,8 @@ struct FuncDecl : Decl {
     std::unique_ptr<Block> body;
     // 8.4: "msabi"/"sysv"; empty means the platform default (SysV).
     std::string abi;
+    // VARIADICS.md §2: a trailing `...` makes this a C variadic function.
+    bool variadic = false;
     FuncDecl(Position p, std::string n, std::vector<std::string> tps,
              std::vector<Param> ps, std::unique_ptr<TypeExpr> r, std::unique_ptr<Block> b)
         : Decl(std::move(p)), name(std::move(n)), typeParams(std::move(tps)),
@@ -743,6 +749,8 @@ struct ExternFunc : Decl {
     std::vector<Param> params;
     std::unique_ptr<TypeExpr> returns;
     std::string abi;
+    // VARIADICS.md §2: a trailing `...` on the extern declaration.
+    bool variadic = false;
     ExternFunc(Position p, std::string n, std::vector<Param> ps,
                std::unique_ptr<TypeExpr> r, std::string a)
         : Decl(std::move(p)), name(std::move(n)), params(std::move(ps)),

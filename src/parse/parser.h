@@ -104,7 +104,11 @@ private:
     // `# experimental(name)`. Returns false for an unknown behaviour, which is a
     // diagnostic naming it rather than a silent no-op.
     bool parseDirective(Program& program);
-    std::vector<Param> parseParams();
+    // Parses one parenthesized parameter list. `allowVariadic` accepts a
+    // trailing `...` (VARIADICS.md §2) and records it in `variadic`; where the
+    // mark is not allowed, `disallowed` names the reason in a diagnostic.
+    std::vector<Param> parseParams(bool allowVariadic, bool& variadic,
+                                   const char* disallowed);
     std::unique_ptr<TypeExpr> parseReturnType();
     FieldDecl parseField();
     MethodDecl parseMethod();

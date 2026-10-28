@@ -14,14 +14,19 @@ bool sameParameter(const Parameter& lhs, const Parameter& rhs) {
     return lhs.type == rhs.type && lhs.isMutable == rhs.isMutable;
 }
 
-Signature::Signature(std::vector<Parameter> parameters, const Type* returnType, Abi abi)
-    : parameters_(std::move(parameters)), returnType_(returnType), abi_(abi) {}
+Signature::Signature(std::vector<Parameter> parameters, const Type* returnType, Abi abi,
+                     bool variadic)
+    : parameters_(std::move(parameters)), returnType_(returnType), abi_(abi),
+      variadic_(variadic) {}
 
 bool sameSignature(const Signature& lhs, const Signature& rhs) {
     if (lhs.returnType() != rhs.returnType()) {
         return false;
     }
     if (lhs.abi() != rhs.abi()) {
+        return false;
+    }
+    if (lhs.variadic() != rhs.variadic()) {
         return false;
     }
     const std::vector<Parameter>& a = lhs.parameters();

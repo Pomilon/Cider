@@ -666,6 +666,39 @@ void testArrowAccess() {
     }
 }
 
+// VARIADICS.md §2: a trailing `...` on a free function, an extern and a
+// function-pointer type; nowhere else.
+void testVariadicSyntax() {
+    std::printf("variadic syntax\n");
+    bool ok = false;
+    auto program = parse(
+        "extern func printf(fmt: *char, ...) -> int;\n"
+        "func count(n: int, ...) -> int { return n; }\n"
+        "var cb: *func(*char, ...) -> int = &printf;\n",
+        ok);
+    check(ok, "variadic declaration and function pointer parse");
+    if (!ok) { return; }
+    const auto& fn = static_cast<const cider::FuncDecl&>(*program->decls[1]);
+    check(fn.variadic, "a free function records ...");
+    const auto& var = static_cast<const cider::VarDecl&>(*program->globals[0]);
+    const auto& ptr = static_cast<const cider::PointerType&>(*var.type);
+    const auto& sig = static_cast<const cider::FuncSigType&>(*ptr.pointee);
+    check(sig.variadic, "a function pointer records ...");
+
+    ok = false;
+    parse("func f(...) -> int { return 0; }", ok);
+    check(!ok, "at least one named parameter is required");
+    ok = false;
+    parse("func f(a: int, ..., b: int) { }", ok);
+    check(!ok, "... must be last");
+    ok = false;
+    parse("class C { func m(a: int, ...) { } }", ok);
+    check(!ok, "methods cannot be variadic");
+    ok = false;
+    parse("var f: func(int, ...) -> int;", ok);
+    check(!ok, "closures cannot be variadic");
+}
+
 int main() {
     std::printf("parser_test — syntax alone\n\n");
     testPrecedence();
@@ -690,6 +723,7 @@ int main() {
     testAsm();
     testListLiteralNew();
     testModuleKeywords();
+    testVariadicSyntax();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

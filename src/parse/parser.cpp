@@ -495,7 +495,8 @@ std::unique_ptr<Decl> Parser::parseFuncDecl(bool) {
             return nullptr;
         }
     }
-    std::vector<Param> params = parseParams();
+    bool variadic = false;
+    std::vector<Param> params = parseParams(true, variadic, "");
     // `-` is binary by spelling but unary by arity. The declaration's own
     // parameter count names the operator before the checker sees it.
     if (params.size() == kOneParameter && name == "operator_sub") {
@@ -504,9 +505,11 @@ std::unique_ptr<Decl> Parser::parseFuncDecl(bool) {
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!check(TokenKind::LBrace)) {
         if (interfaceMode_ && match(TokenKind::Semi)) {
-            return std::make_unique<FuncDecl>(
+            auto decl = std::make_unique<FuncDecl>(
                 start, std::move(name), std::move(tps), std::move(params),
                 std::move(returns), nullptr);
+            decl->variadic = variadic;
+            return decl;
         }
         failHere("a function needs a body");
         return nullptr;
@@ -515,12 +518,16 @@ std::unique_ptr<Decl> Parser::parseFuncDecl(bool) {
     if (body == nullptr) {
         return nullptr;
     }
-    return std::make_unique<FuncDecl>(start, std::move(name), std::move(tps), std::move(params),
-                                      std::move(returns),
-                                      std::unique_ptr<Block>(static_cast<Block*>(body.release())));
+    auto decl = std::make_unique<FuncDecl>(
+        start, std::move(name), std::move(tps), std::move(params),
+        std::move(returns),
+        std::unique_ptr<Block>(static_cast<Block*>(body.release())));
+    decl->variadic = variadic;
+    return decl;
 }
 
-std::vector<Param> Parser::parseParams() {
+std::vector<Param> Parser::parseParams(bool allowVariadic, bool& variadic,
+                                       const char* disallowed) {
     std::vector<Param> params;
     if (!match(TokenKind::LParen)) {
         failHere("expected '('");
@@ -530,6 +537,25 @@ std::vector<Param> Parser::parseParams() {
         return params;
     }
     for (;;) {
+        // VARIADICS.md §2: `...` is the final parameter marker. It may appear
+        // once, only after at least one named parameter, and only where the
+        // C ABI meaning exists — the caller names the context in `disallowed`.
+        if (match(TokenKind::Ellipsis)) {
+            if (!allowVariadic) {
+                failHere(disallowed);
+                return params;
+            }
+            if (params.empty()) {
+                failHere("a variadic function needs at least one named parameter");
+                return params;
+            }
+            if (!match(TokenKind::RParen)) {
+                failHere("... must be the last parameter");
+                return params;
+            }
+            variadic = true;
+            return params;
+        }
         Position ppos = peek().pos;
         bool isMutable = match(TokenKind::KwVar);
         if (!check(TokenKind::Ident)) {
@@ -652,7 +678,8 @@ MethodDecl Parser::parseMethod() {
     if (!interfaceMode_ && (check(TokenKind::KwInit) || check(TokenKind::KwDeinit))) {
         failHere("an init or deinit needs a body");
     }
-    std::vector<Param> params = parseParams();
+    bool ignored = false;
+    std::vector<Param> params = parseParams(false, ignored, "methods cannot be variadic");
     // A member operator's receiver is implicit: unary minus declares no
     // parameters, while one parameter makes it the binary subtraction
     // operator. The free spelling below has the opposite arity mapping.
@@ -871,7 +898,9 @@ std::unique_ptr<Decl> Parser::parseInterfaceDecl() {
             return nullptr;
         }
         std::string mname = advance().text;
-        std::vector<Param> params = parseParams();
+        bool ignored = false;
+        std::vector<Param> params = parseParams(false, ignored,
+                                                "methods cannot be variadic");
         std::unique_ptr<TypeExpr> returns = parseReturnType();
         if (!match(TokenKind::Semi)) {
             failHere("expected ';'");
@@ -1063,14 +1092,17 @@ std::unique_ptr<Decl> Parser::parseExtern() {
         return nullptr;
     }
     std::string name = advance().text;
-    std::vector<Param> params = parseParams();
+    bool variadic = false;
+    std::vector<Param> params = parseParams(true, variadic, "");
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!match(TokenKind::Semi)) {
         failHere("expected ';'");
         return nullptr;
     }
-    return std::make_unique<ExternFunc>(start, std::move(name), std::move(params),
-                                        std::move(returns), std::move(abi));
+    auto ext = std::make_unique<ExternFunc>(start, std::move(name), std::move(params),
+                                            std::move(returns), std::move(abi));
+    ext->variadic = variadic;
+    return ext;
 }
 
 bool Parser::matchModuleSegment(std::string& out) {
@@ -1793,6 +1825,16 @@ std::unique_ptr<TypeExpr> Parser::parseType() {
     if (type == nullptr) {
         return nullptr;
     }
+    // VARIADICS.md §2: `...` has a C ABI meaning only on a function pointer.
+    // A bare `func(...)` spelling is the closure value type, so the mark is
+    // refused here, where the `*` depth is known.
+    if (depth == 0) {
+        const auto* sig = dynamic_cast<const FuncSigType*>(type.get());
+        if (sig != nullptr && sig->variadic) {
+            failHere("closures cannot be variadic");
+            return nullptr;
+        }
+    }
     (void)start;
     bool innermost = true;
     while (depth > 0) {
@@ -1978,8 +2020,25 @@ std::unique_ptr<TypeExpr> Parser::parseFuncSig() {
         return nullptr;
     }
     std::vector<std::unique_ptr<TypeExpr>> params;
+    bool variadic = false;
     if (!check(TokenKind::RParen)) {
         for (;;) {
+            // VARIADICS.md §2: a trailing `...` marks the C variadic tail.
+            // The same rules as a declaration's parameter list hold here;
+            // whether this spelling may carry the mark at all — pointer yes,
+            // closure no — is parseType's call, which knows the `*` depth.
+            if (match(TokenKind::Ellipsis)) {
+                if (params.empty()) {
+                    failHere("a variadic function needs at least one named parameter");
+                    return nullptr;
+                }
+                if (!check(TokenKind::RParen)) {
+                    failHere("... must be the last parameter");
+                    return nullptr;
+                }
+                variadic = true;
+                break;
+            }
             // The Standard's fn-type spellings name their parameters
             // (`*func(code: int) -> bool`); a name carries no meaning in a
             // type, so it parses and is dropped.
@@ -2003,7 +2062,9 @@ std::unique_ptr<TypeExpr> Parser::parseFuncSig() {
         return nullptr;
     }
     std::unique_ptr<TypeExpr> returns = parseReturnType();
-    return std::make_unique<FuncSigType>(start, std::move(params), std::move(returns));
+    auto sig = std::make_unique<FuncSigType>(start, std::move(params), std::move(returns));
+    sig->variadic = variadic;
+    return sig;
 }
 // --- Expressions -------------------------------------------------------------
 
@@ -2785,7 +2846,8 @@ std::unique_ptr<Expr> Parser::parseAlignof() {
 
 std::unique_ptr<Expr> Parser::parseFuncLit() {
     Position start = advance().pos;
-    std::vector<Param> params = parseParams();
+    bool ignored = false;
+    std::vector<Param> params = parseParams(false, ignored, "closures cannot be variadic");
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!check(TokenKind::LBrace)) {
         failHere("a closure needs a body");

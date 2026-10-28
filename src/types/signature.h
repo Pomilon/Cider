@@ -40,26 +40,32 @@ struct Parameter {
 bool sameParameter(const Parameter& lhs, const Parameter& rhs);
 
 // What a function, function pointer or closure is: its parameters in order,
-// its return type, and its ABI. A null return type means `void`, which is how
+// its return type, its ABI, and whether it takes a C variadic tail
+// (VARIADICS.md §3). A null return type means `void`, which is how
 // `func f()` and `func f() -> void` end up one spelling rather than two.
 class Signature {
 public:
     Signature() = default;
-    Signature(std::vector<Parameter> parameters, const Type* returnType, Abi abi = Abi::SysV);
+    Signature(std::vector<Parameter> parameters, const Type* returnType, Abi abi = Abi::SysV,
+              bool variadic = false);
 
     const std::vector<Parameter>& parameters() const { return parameters_; }
     const Type* returnType() const { return returnType_; }
     Abi abi() const { return abi_; }
+    bool variadic() const { return variadic_; }
     uint64_t arity() const { return static_cast<uint64_t>(parameters_.size()); }
 
 private:
     std::vector<Parameter> parameters_;
     const Type* returnType_ = nullptr;   // null means void
     Abi abi_ = Abi::SysV;
+    bool variadic_ = false;
 };
 
 // True when two signatures take the same parameters pairwise in order, return
-// the same type, and agree on ABI. Written once here; every site that compares
+// the same type, agree on ABI, and agree on the variadic bit (VARIADICS.md §2:
+// a variadic pointer is not compatible with a non-variadic pointer). Written
+// once here; every site that compares
 // two signatures calls it. TYPES.md §2.3 needs it for interface identity: two
 // interfaces with identical method names and different signatures are different
 // interfaces, and that test is a signature comparison.

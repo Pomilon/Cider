@@ -1608,7 +1608,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             bool failed = false;
             Signature sig = buildSignature(fn->params, fn->returns.get(), inner, failed,
-                                           abiOf(fn->abi, failed, fn->pos));
+                                           abiOf(fn->abi, failed, fn->pos), fn->variadic);
             const_cast<Decl*>(d)->sig = std::move(sig);
             continue;
         }
@@ -1619,7 +1619,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             bool failed = false;
             Signature sig = buildSignature(ext->params, ext->returns.get(), scope, failed,
-                                           abiOf(ext->abi, failed, ext->pos));
+                                           abiOf(ext->abi, failed, ext->pos), ext->variadic);
             const_cast<Decl*>(d)->sig = std::move(sig);
             continue;
         }
@@ -2249,7 +2249,7 @@ Signature Resolver::substSig(const Signature& sig, DeclId tmpl,
         subRet = substitute(TypeRef{ret}, tmpl, args, pos);
     }
     return Signature(std::move(params), subRet.isError() ? nullptr : subRet.type,
-                     sig.abi());
+                     sig.abi(), sig.variadic());
 }
 
 const Signature* Resolver::funcSig(DeclId id) const {
@@ -2361,7 +2361,7 @@ TypeRef Resolver::resolveSignature(const FuncSigType* type, const Scope* scope,
                                   bool inPointer) {
     bool failed = false;
     Signature sig = buildFuncSig(type->params, type->returns.get(), scope, failed,
-                                 abiOf(type->abi, failed, type->pos));
+                                 abiOf(type->abi, failed, type->pos), type->variadic);
     if (failed) {
         return errorRef();
     }
@@ -2389,7 +2389,7 @@ Abi Resolver::abiOf(const std::string& spelling, bool& failed, Position pos) {
 
 Signature Resolver::buildSignature(const std::vector<Param>& params,
                                    const TypeExpr* returns, const Scope* scope,
-                                   bool& failed, Abi abi) {
+                                   bool& failed, Abi abi, bool variadic) {
     std::vector<Parameter> out;
     for (const Param& param : params) {
         TypeRef t = resolveType(param.type.get(), scope);
@@ -2411,7 +2411,7 @@ Signature Resolver::buildSignature(const std::vector<Param>& params,
             ret = t.type;
         }
     }
-    return Signature(std::move(out), ret, abi);
+    return Signature(std::move(out), ret, abi, variadic);
 }
 
 void Resolver::buildMethodSig(const MethodDecl& method, const Scope* scope, bool& failed) {
@@ -2421,7 +2421,7 @@ void Resolver::buildMethodSig(const MethodDecl& method, const Scope* scope, bool
 
 Signature Resolver::buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
                                  const TypeExpr* returns, const Scope* scope,
-                                 bool& failed, Abi abi) {
+                                 bool& failed, Abi abi, bool variadic) {
     std::vector<Parameter> out;
     for (const std::unique_ptr<TypeExpr>& param : params) {
         TypeRef t = resolveType(param.get(), scope);
@@ -2442,7 +2442,7 @@ Signature Resolver::buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& p
             ret = t.type;
         }
     }
-    return Signature(std::move(out), ret, abi);
+    return Signature(std::move(out), ret, abi, variadic);
 }
 
 const Scope* Resolver::typeParamScope(const Scope* parent, const std::string& module,

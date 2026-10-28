@@ -218,7 +218,8 @@ public:
     // checker rebuilds function signatures with it when walking bodies — one
     // function, called from two phases, never two rules.
     Signature buildSignature(const std::vector<Param>& params, const TypeExpr* returns,
-                             const Scope* scope, bool& failed, Abi abi = Abi::SysV);
+                             const Scope* scope, bool& failed, Abi abi = Abi::SysV,
+                             bool variadic = false);
     // Binds one type parameter into a scope, for the checker's generic body
     // walks. The resolver owns every Decl; the checker borrows them.
     const Decl* bindTypeParam(const Scope* scope, const std::string& name,
@@ -307,7 +308,7 @@ private:
     void buildMethodSig(const MethodDecl& method, const Scope* scope, bool& failed);
     Signature buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
                            const TypeExpr* returns, const Scope* scope, bool& failed,
-                           Abi abi = Abi::SysV);
+                           Abi abi = Abi::SysV, bool variadic = false);
     // Creates the core declarations once and binds their names in each
     // module scope. They have no AST: their fields and enumerators live in
     // the resolver's tables beside every specialized generic.
