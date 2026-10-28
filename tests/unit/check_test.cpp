@@ -3152,7 +3152,11 @@ void testVariadicCalls() {
     std::printf("variadic calls and promotions\n");
     Checked ok = check(
         "extern func sink(fmt: *char, ...) -> int;\n"
-        "func f() -> int { return sink(\"x\", 1 as i8, true, 2.0 as f32); }\n");
+        "func f() -> int {\n"
+        "    return sink(\"x\", 1 as i8, 1 as i16, 1 as u8, 1 as u16, 'a',\n"
+        "                true, 1.0 as f32, 2.0 as f64, 1 as u32, 1 as i64,\n"
+        "                1 as u64);\n"
+        "}\n");
     check(ok.ok, "extra scalar arguments are accepted: " + ok.stage);
     Checked few = check(
         "extern func sink(fmt: *char, ...) -> int;\n"
@@ -3172,10 +3176,58 @@ void testVariadicCalls() {
         "func f() -> int { return p(\"x\", 7); }\n");
     check(ptr.ok, "a variadic function pointer carries the bit: " + ptr.stage);
     // VARIADICS.md §2-3: the flag is part of signature identity, so the two
-    // pointer spellings never substitute for one another.
-    Checked p1 = check("var a: *func(int) -> int = nilPtr;\n"
-                       "var b: *func(int, ...) -> int = a;\n");
-    check(!p1.ok, "variadic and non-variadic pointers are incompatible");
+    // pointer spellings never substitute for one another. Locals keep the
+    // check on the signature row rather than the global-initializer rule.
+    Checked p1 = check(
+        "func g(x: int) -> int { return x; }\n"
+        "func f() -> void {\n"
+        "    var a: *func(int) -> int = &g;\n"
+        "    var b: *func(int, ...) -> int = a;\n"
+        "}\n");
+    check(!p1.ok && hasDiagnostic(
+              p1, "cannot use *func(i32) -> i32 as *func(i32, ...) -> i32"),
+          "a non-variadic pointer is not a variadic pointer");
+    Checked p2 = check(
+        "func g(x: int) -> int { return x; }\n"
+        "func f() -> void {\n"
+        "    var a: *func(int, ...) -> int = nilPtr;\n"
+        "    var b: *func(int) -> int = a;\n"
+        "}\n");
+    check(!p2.ok && hasDiagnostic(
+              p2, "cannot use *func(i32, ...) -> i32 as *func(i32) -> i32"),
+          "a variadic pointer is not a non-variadic pointer");
+    // An explicit cast is the source's one bridge across conventions: the
+    // variadic bit rides the same 8.4 rule an ABI cast does.
+    Checked cross = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int {\n"
+        "    var p: *func(*char, ...) -> int = &sink;\n"
+        "    var q: *func(*char) -> int = p as *func(*char) -> int;\n"
+        "    return q(\"x\");\n"
+        "}\n");
+    check(cross.ok, "an explicit cast may cross the variadic bit: " + cross.stage);
+    // An unbound argument has already failed; the promotion rule must not
+    // name a second cause for the same argument.
+    Checked unbound = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int { return sink(\"x\", missing); }\n");
+    check(!unbound.ok && !hasDiagnostic(unbound, "integer, pointer or f64"),
+          "an unbound variadic argument reports only its own failure");
+    // An enum is an integer at the C ABI: it promotes to i32.
+    Checked enumeration = check(
+        "enum Color { RED, GREEN }\n"
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func f() -> int { var c: Color = 0 as Color; return sink(\"x\", c); }\n");
+    check(enumeration.ok, "an enum variadic argument is accepted: " + enumeration.stage);
+    // A function pointer is a one-word pointer at the C ABI: it passes through.
+    Checked fnPtr = check(
+        "extern func sink(fmt: *char, ...) -> int;\n"
+        "func g(x: int) -> int { return x; }\n"
+        "func f() -> int {\n"
+        "    var p: *func(int) -> int = &g;\n"
+        "    return sink(\"x\", p);\n"
+        "}\n");
+    check(fnPtr.ok, "a function pointer variadic argument is accepted: " + fnPtr.stage);
     // Named parameters keep their declared types: no promotion applies there.
     Checked named = check(
         "extern func sink(fmt: *char, ...) -> int;\n"

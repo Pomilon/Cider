@@ -19,9 +19,10 @@ class TypeContext;
 // The type a variadic argument is passed as, or nothing when the type has no
 // C variadic representation in this slice: bool, char, i8, i16, u8 and u16
 // widen to i32; f32 widens to f64; i32, u32, i64, u64 and f64 pass
-// unchanged; pointers pass unchanged. Strings, arrays, structs, classes,
-// unions, closures and va_list answer nothing, because the first slice
-// carries scalar values only (VARIADICS.md §4).
+// unchanged; data and function pointers pass unchanged; an enum passes as its
+// i32 value. Strings, arrays, structs, classes, unions, closures and va_list
+// answer nothing, because the first slice carries scalar values only
+// (VARIADICS.md §4).
 std::optional<TypeRef> promoteVariadicArgument(TypeRef type, TypeContext& ctx);
 
 }  // namespace cider

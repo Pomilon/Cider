@@ -9,6 +9,7 @@
 
 #include "types/context.h"
 #include "types/type.h"
+#include "types/variadic.h"
 
 namespace {
 
@@ -197,6 +198,58 @@ void testLayout() {
     check(cider::typeSize(ctx.alias(cider::DeclId{})) == -1, "an alias has no size to report");
 }
 
+// VARIADICS.md §4: every row of the C default-promotion table, and the types
+// that have no variadic representation in this slice.
+void testVariadicPromotions() {
+    std::printf("variadic promotions follow the C table\n");
+    cider::TypeContext ctx;
+    const cider::TypeRef i32{ctx.basic(cider::BasicKind::I32)};
+    const cider::TypeRef f64{ctx.basic(cider::BasicKind::F64)};
+    auto promotesTo = [&](cider::BasicKind from, cider::TypeRef want) {
+        auto got = cider::promoteVariadicArgument(cider::TypeRef{ctx.basic(from)}, ctx);
+        return got.has_value() && *got == want;
+    };
+    check(promotesTo(cider::BasicKind::Bool, i32), "bool promotes to i32");
+    check(promotesTo(cider::BasicKind::Char, i32), "char promotes to i32");
+    check(promotesTo(cider::BasicKind::I8, i32), "i8 promotes to i32");
+    check(promotesTo(cider::BasicKind::I16, i32), "i16 promotes to i32");
+    check(promotesTo(cider::BasicKind::U8, i32), "u8 promotes to i32");
+    check(promotesTo(cider::BasicKind::U16, i32), "u16 promotes to i32");
+    check(promotesTo(cider::BasicKind::F32, f64), "f32 promotes to f64");
+    auto unchanged = [&](cider::BasicKind basic) {
+        cider::TypeRef type{ctx.basic(basic)};
+        auto got = cider::promoteVariadicArgument(type, ctx);
+        return got.has_value() && *got == type;
+    };
+    check(unchanged(cider::BasicKind::I32), "i32 passes unchanged");
+    check(unchanged(cider::BasicKind::U32), "u32 passes unchanged");
+    check(unchanged(cider::BasicKind::I64), "i64 passes unchanged");
+    check(unchanged(cider::BasicKind::U64), "u64 passes unchanged");
+    check(unchanged(cider::BasicKind::F64), "f64 passes unchanged");
+    cider::TypeRef pointer{ctx.pointer(ctx.basic(cider::BasicKind::U8))};
+    auto gotPointer = cider::promoteVariadicArgument(pointer, ctx);
+    check(gotPointer.has_value() && *gotPointer == pointer,
+          "a data pointer passes unchanged");
+    cider::Signature sig({}, ctx.basic(cider::BasicKind::I32), cider::Abi::SysV);
+    cider::TypeRef fn{ctx.functionPtr(sig)};
+    auto gotFn = cider::promoteVariadicArgument(fn, ctx);
+    check(gotFn.has_value() && *gotFn == fn, "a function pointer passes unchanged");
+    cider::TypeRef enumeration{ctx.nominal(cider::Kind::Enum, cider::DeclId{1, 1})};
+    auto gotEnum = cider::promoteVariadicArgument(enumeration, ctx);
+    check(gotEnum.has_value() && *gotEnum == i32, "an enum promotes to i32");
+    auto rejected = [&](cider::TypeRef type) {
+        return !cider::promoteVariadicArgument(type, ctx).has_value();
+    };
+    check(rejected(cider::TypeRef{ctx.string()}), "a string has no variadic form");
+    check(rejected(cider::TypeRef{ctx.vaList()}), "va_list has no variadic form");
+    check(rejected(cider::TypeRef{ctx.array(ctx.basic(cider::BasicKind::I32), 2)}),
+          "an array has no variadic form");
+    check(rejected(cider::TypeRef{
+              ctx.nominal(cider::Kind::Struct, cider::DeclId{1, 2})}),
+          "a struct has no variadic form");
+    check(rejected(cider::errorRef()), "an error has no variadic form");
+}
+
 }  // namespace
 
 int main() {
@@ -210,6 +263,7 @@ int main() {
     testSignatures();
     testNames();
     testLayout();
+    testVariadicPromotions();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

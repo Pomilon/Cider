@@ -2790,9 +2790,11 @@ void Checker::visitCast(Cast& n) {
         }
         // One function pointer casts to another by its single code word: the
         // row check below owns that pair, and 8.4 blesses an explicit cast
-        // across conventions. Adopting the pair (a closure target) still
-        // needs proven provenance, and so does any cast out of a void
-        // carrier or byte view.
+        // across conventions. The variadic bit rides the same rule: a cast is
+        // the source's explicit claim that the callee keeps the other calling
+        // shape, so `*func(int) -> int` and `*func(int, ...) -> int` cast to
+        // one another even though assignment refuses the pair
+        // (VARIADICS.md §2).
         const bool pointerToPointer =
             from.type->kind() == Kind::FunctionPtr &&
             target.type->kind() == Kind::FunctionPtr;
@@ -5055,6 +5057,11 @@ bool Checker::checkCallArguments(Call& expr, const Signature& sig, bool generic)
     // no C variadic representation (VARIADICS.md §4).
     for (uint64_t i = named; i < got; ++i) {
         TypeRef value = checkExpr(expr.args[i].get(), TypeRef{ctx_.wildcard()});
+        if (value.isError()) {
+            // The argument already failed on its own; naming the promotion
+            // here would report a second cause for the same expression.
+            return false;
+        }
         auto promoted = promoteVariadicArgument(value, ctx_);
         if (!promoted.has_value()) {
             fail(expr.args[i]->pos,

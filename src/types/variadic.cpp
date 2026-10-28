@@ -16,8 +16,15 @@ std::optional<TypeRef> promoteVariadicArgument(TypeRef type, TypeContext& ctx) {
         return std::nullopt;
     }
     switch (type.type->kind()) {
+        // A data pointer and a function pointer are one code/data word on
+        // the supported ABI, and C passes both through unchanged.
         case Kind::Pointer:
+        case Kind::FunctionPtr:
             return type;
+        // C enums are ints: the value crosses the tail as its i32 member
+        // (the enum's own layout is 4 bytes, layout.h's kSizeEnum).
+        case Kind::Enum:
+            return TypeRef{ctx.basic(BasicKind::I32)};
         case Kind::Basic:
             break;
         // Everything else is an aggregate, a nominal, a closure or an
@@ -32,9 +39,7 @@ std::optional<TypeRef> promoteVariadicArgument(TypeRef type, TypeContext& ctx) {
         case Kind::Interface:
         case Kind::Union:
         case Kind::VaList:
-        case Kind::Enum:
         case Kind::Closure:
-        case Kind::FunctionPtr:
         case Kind::FunctionItem:
         case Kind::TypeParam:
         case Kind::Alias:
