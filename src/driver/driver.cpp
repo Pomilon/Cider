@@ -878,7 +878,12 @@ std::string tool(const char* env, const char* fallback) {
 }
 
 bool makeTempPath(const std::string& prefix, std::string& path) {
-    std::string pattern = prefix + "XXXXXX";
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+        return false;
+    }
+    std::string pattern = (dir / (prefix + "XXXXXX")).string();
     std::vector<char> name(pattern.begin(), pattern.end());
     name.push_back('\0');
     int fd = mkstemp(name.data());
@@ -1219,7 +1224,7 @@ int linkInputs(target::Kind targetKind, const std::vector<std::string>& inputs,
     std::string temporaryScript;
     std::string scriptPath = script;
     if (targetKind == target::Kind::Pomeos && scriptPath.empty()) {
-        if (!makeTempPath("/tmp/cider_link_", temporaryScript)) {
+        if (!makeTempPath("cider_link_", temporaryScript)) {
             err = "cannot create a temporary linker script\n";
             return 1;
         }
@@ -1329,7 +1334,7 @@ bool copyArtifact(const std::string& from, const std::string& to,
 bool assembleObject(const std::string& assemblyText,
                     const std::string& objectPath, std::string& error) {
     std::string assemblyPath;
-    if (!makeTempPath("/tmp/cider_object_", assemblyPath)) {
+    if (!makeTempPath("cider_object_", assemblyPath)) {
         error = "cannot create a temporary assembly file\n";
         return false;
     }
@@ -1988,7 +1993,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         const std::string objectPath =
             output.empty() ? defaultObjectPath(input) : output;
         std::string assemblyPath;
-        if (!makeTempPath("/tmp/cider_object_", assemblyPath)) {
+        if (!makeTempPath("cider_object_", assemblyPath)) {
             err = "cannot create a temporary assembly file\n";
             return 1;
         }
@@ -2022,9 +2027,9 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     std::string assemblyPath;
     std::string objectPath;
     std::string binaryPath;
-    if (!makeTempPath("/tmp/cider_run_", assemblyPath) ||
-        !makeTempPath("/tmp/cider_run_obj_", objectPath) ||
-        !makeTempPath("/tmp/cider_run_bin_", binaryPath)) {
+    if (!makeTempPath("cider_run_", assemblyPath) ||
+        !makeTempPath("cider_run_obj_", objectPath) ||
+        !makeTempPath("cider_run_bin_", binaryPath)) {
         unlink(assemblyPath.c_str());
         unlink(objectPath.c_str());
         unlink(binaryPath.c_str());

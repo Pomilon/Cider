@@ -28,8 +28,6 @@ OVMF_CANDIDATES = [
     ("/usr/share/OVMF/x64/OVMF_CODE.4m.fd",
      "/usr/share/OVMF/x64/OVMF_VARS.4m.fd"),
     ("/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"),
-    ("<external-os>/OVMF/OVMF_CODE-pure-efi.fd",
-     "<external-os>/OVMF/OVMF_VARS-pure-efi.fd"),
 ]
 
 

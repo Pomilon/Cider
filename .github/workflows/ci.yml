@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            binutils \
+            clang \
+            cmake \
+            lld \
+            nasm \
+            ninja-build \
+            python3
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j2
+
+      - name: CTest
+        env:
+          CIDER_BIN: ${{ github.workspace }}/build/cider
+          CIDER_LIB: ${{ github.workspace }}/modules
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Corpus
+        env:
+          CIDER_BIN: ${{ github.workspace }}/build/cider
+          CIDER_LIB: ${{ github.workspace }}/modules
+        run: python3 tests/run_corpus.py
+
+      - name: Gates
+        env:
+          CIDER_BIN: ${{ github.workspace }}/build/cider
+          CIDER_LIB: ${{ github.workspace }}/modules
+        run: python3 scripts/gates.py
+
+      - name: Fuzz smoke
+        env:
+          CIDER_BIN: ${{ github.workspace }}/build/cider
+          CIDER_LIB: ${{ github.workspace }}/modules
+        run: python3 tests/fuzz.py --seed 20261027 --count 250

@@ -27,6 +27,8 @@ Thumbs.db
 
 # Superpowers workflow docs — strictly local, not pushed to remote
 docs/superpowers/
+docs/chronicles/
+.superpowers/
 __pycache__/
 build-asan/
 

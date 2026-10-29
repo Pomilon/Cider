@@ -26,9 +26,10 @@ import os
 import random
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CIDER = os.path.join(ROOT, "build", "v3", "cider")
+CIDER = os.environ.get("CIDER_BIN", os.path.join(ROOT, "build", "v3", "cider"))
 ENV = dict(os.environ, CIDER_LIB=os.path.join(ROOT, "modules"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from source_entry import with_main_entry  # noqa: E402
@@ -325,7 +326,8 @@ def main():
             print(f"[{i}] GENERATOR-BUG: {e}")
             fails += 1
             continue
-        path = f"<tmp>/fuzz_{args.seed}_{i}.cid"
+        path = os.path.join(tempfile.gettempdir(),
+                             f"cider_fuzz_{args.seed}_{i}.cid")
         with open(path, "w") as f:
             f.write(with_main_entry(src))
         status, rc, out = run_one(path)
