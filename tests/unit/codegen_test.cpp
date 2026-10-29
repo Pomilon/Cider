@@ -3521,6 +3521,27 @@ void testVariadicSysVExecution() {
         signaled, false, varargsLoader());
     check(!signaled && code == 42,
           "a variadic f64 follows a named f64 in the SSE save area");
+
+    // A negative value keeps its sign through the variadic cursor. The Cider
+    // caller already stages canonical words, so this covers the Cider-native
+    // path; the raw `mov esi, 0xffffffff` spelling a C caller produces is
+    // proved by tests/v4/varargs_test.py.
+    code = runCode(
+        "from std.varargs import VaList, va_start, va_arg_i32;\n"
+        "func count_neg(n: int, ...) -> int {\n"
+        "  var ap: VaList = uninit; va_start(&ap);\n"
+        "  var count: int = 0;\n"
+        "  var i: int = 0;\n"
+        "  while (i < n) {\n"
+        "    if (va_arg_i32(&ap) < 0) { count = count + 1; }\n"
+        "    i = i + 1;\n"
+        "  }\n"
+        "  return count;\n"
+        "}\n"
+        "func main() -> int { return count_neg(3, -1, -2, -3); }\n",
+        signaled, false, varargsLoader());
+    check(!signaled && code == 3,
+          "a negative i32 va_arg reads sign-extended");
 }
 
 // VARIADICS.md §7: the Microsoft x64 caller gives each argument one

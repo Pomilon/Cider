@@ -922,6 +922,35 @@ private:
         return true;
     }
 
+    // A save slot is eight bytes, but the IR value is typed. A C caller
+    // writes a negative i32 as `mov esi, 0xffffffff`, leaving the upper half
+    // zero, so reading the whole word would turn -1 into 0x00000000ffffffff
+    // and answer every signed comparison wrong. Canonicalize the low `width`
+    // bytes of rdx the way emitLoadMem extends a memory read. Widths wider
+    // than the write (I64/U64/Ptr) and floats keep their word unchanged.
+    void canonicalizeVaArg(const ir::Instr& instr) {
+        const bool isSigned = ir::signedWidth(instr.width, instr.type);
+        switch (instr.width) {
+            case ir::IRType::I8:
+            case ir::IRType::U8:
+            case ir::IRType::Bool:
+                out_ += isSigned ? "  movsx rdx, dl\n" : "  movzx edx, dl\n";
+                return;
+            case ir::IRType::I16:
+            case ir::IRType::U16:
+                out_ += isSigned ? "  movsx rdx, dx\n" : "  movzx edx, dx\n";
+                return;
+            case ir::IRType::I32:
+                out_ += "  movsxd rdx, edx\n";
+                return;
+            case ir::IRType::U32:
+                out_ += "  mov edx, edx\n";
+                return;
+            default:
+                return;
+        }
+    }
+
     // VARIADICS.md §6: one value out of the cursor, then advance it. Integer
     // and pointer arguments consume the next 8-byte GPR save slot while
     // gp_offset < 48; an f64 consumes the next 16-byte XMM slot while
@@ -942,6 +971,7 @@ private:
             out_ += "  add rdx, " + std::to_string(kWordBytes) + "\n";
             out_ += "  mov qword ptr [rax], rdx\n";
             out_ += "  mov rdx, r11\n";
+            canonicalizeVaArg(instr);
             storeResult(instr.results[0].id, "rdx");
             return true;
         }
@@ -982,6 +1012,7 @@ private:
         out_ += "  mov qword ptr [rax + 8], rdx\n";
         out_ += "  mov rdx, r11\n";
         out_ += done + ":\n";
+        canonicalizeVaArg(instr);
         storeResult(instr.results[0].id, "rdx");
         return true;
     }

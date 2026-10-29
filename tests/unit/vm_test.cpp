@@ -1263,6 +1263,20 @@ void testVariadicVm() {
          "}\n"
          "func main() -> int { return sum(1, 2, 3.5); }\n",
          6, "scalar variadic sum");
+    // A negative i32 canonicalizes to its 64-bit sign extension before any
+    // signed comparison, on the same rule the native leg applies.
+    both("from std.varargs import VaList, va_start, va_arg_i32, va_end;\n"
+         "func count_neg(n: int, ...) -> int {\n"
+         "  var ap: VaList = uninit; va_start(&ap);\n"
+         "  var count: int = 0; var i: int = 0;\n"
+         "  while (i < n) {\n"
+         "    if (va_arg_i32(&ap) < 0) { count = count + 1; }\n"
+         "    i = i + 1;\n"
+         "  }\n"
+         "  va_end(&ap); return count;\n"
+         "}\n"
+         "func main() -> int { return count_neg(3, -1, -2, -3); }\n",
+         3, "negative variadic i32 values");
     // Every integer spelling reads the next GPR slot, and the seventh
     // integer word crosses into the overflow area.
     both("from std.varargs import VaList, va_start, va_arg_i32, va_arg_i64,\n"

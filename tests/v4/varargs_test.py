@@ -82,8 +82,8 @@ CALLER_FAILURES = {
 # The C-to-Cider direction: `sum` reads every value twice through va_copy,
 # so both cursors must yield the same total. `sum_f64` and `sum_ptr` cover
 # the other two scalar classes the ABI carries.
-SUM = """from std.varargs import VaList, va_start, va_copy, va_end, va_arg_i64,
-    va_arg_f64, va_arg_ptr;
+SUM = """from std.varargs import VaList, va_start, va_copy, va_end, va_arg_i32,
+    va_arg_i64, va_arg_f64, va_arg_ptr;
 
 export func sum(n: i32, ...) -> i64 {
     var ap: VaList = uninit;
@@ -135,15 +135,30 @@ export func sum_ptr(n: i32, ...) -> i64 {
     return total;
 }
 
+export func count_neg(n: i32, ...) -> i64 {
+    var ap: VaList = uninit;
+    va_start(&ap);
+    var count: i64 = 0;
+    var i: i32 = 0;
+    while (i < n) {
+        if (va_arg_i32(&ap) < 0) { count = count + 1; }
+        i = i + 1;
+    }
+    va_end(&ap);
+    return count;
+}
+
 extern func c_call_sum() -> i64;
 extern func c_call_f64() -> i64;
 extern func c_call_ptr() -> i64;
+extern func c_call_count_neg() -> i64;
 
 func _start() -> void {
     var bad: i32 = 0;
     if (c_call_sum() != 42) { bad = 1; }
     if (c_call_f64() != 7) { bad = 2; }
     if (c_call_ptr() != 42) { bad = 3; }
+    if (c_call_count_neg() != 3) { bad = 4; }
     asm {
         "mov rax, 60"
         "mov edi, {bad}"
@@ -156,6 +171,7 @@ SUM_FAILURES = {
     1: "C caller to Cider va_copy/va_end integer sum",
     2: "C caller to Cider f64 sum",
     3: "C caller to Cider pointer sum",
+    4: "C caller negative i32 va_arg sign extension",
 }
 
 # gcc has no libc here: the caller is an ordinary function the Cider `_start`
@@ -165,6 +181,7 @@ C_CALLER = """#include <stdint.h>
 extern int64_t sum(int n, ...);
 extern double sum_f64(int n, ...);
 extern int64_t sum_ptr(int n, ...);
+extern int64_t count_neg(int n, ...);
 
 int64_t c_call_sum(void) {
     /* Eight variadic words: five past the named register and three on the
@@ -180,6 +197,12 @@ int64_t c_call_ptr(void) {
     int64_t a = 20;
     int64_t b = 22;
     return sum_ptr(2, &a, &b);
+}
+
+int64_t c_call_count_neg(void) {
+    /* int promotes to a 32-bit variadic word: gcc writes `mov esi,
+       0xffffffff`, so the callee must sign-extend before comparing. */
+    return count_neg(3, -1, -2, -3);
 }
 """
 
