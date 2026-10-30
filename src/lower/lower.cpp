@@ -11914,12 +11914,15 @@ void Lowerer::onFor(ForStmt& n) {
     // A body that ended in a jump (break, continue, return) closed its own
     // block; one that fell through still needs the edge to the step.
     if (!terminated_) {
+        runDefers(loopMarks_.back());
         ir::Terminator toStep;
         toStep.term = ir::Term::Br;
         toStep.target = stepLabel;
         toStep.loc = n.pos;
         emitTerminator(toStep);
     }
+    loopMarks_.pop_back();
+    deferFrames_.pop_back();
     terminated_ = savedTerminated;
 
     startBlock(stepLabel);
