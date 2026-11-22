@@ -61,6 +61,9 @@ struct Pipeline {
     std::unique_ptr<TypeContext> types;
     std::unique_ptr<Program> program;
     std::unique_ptr<ir::Module> module;
+    // Per-pass IR dump and counters, filled only when FrontOptions::dumpPasses
+    // is set; consumed only by the `ir` command so no emitted code changes.
+    std::string passTrace;
     // SHA-256 of every interface this front end loaded, by module. An
     // emitted interface records these as dependency hashes and the build
     // cache keys on them.
@@ -346,6 +349,7 @@ void faultAlloc(const char* stage);
 struct FrontOptions {
     target::Kind targetKind = target::Kind::Native;
     bool noOpt = false;
+    bool dumpPasses = false;
     bool checks = false;
     bool requireEntry = true;
     // Whole-program is the existing compile/run path: every resolved module
@@ -705,7 +709,8 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     opt::OptResult result;
     result.ok = true;
     if (!opts.noOpt) {
-        result = opt::run(*pipe.module);
+        result = opts.dumpPasses ? opt::run(*pipe.module, &pipe.passTrace)
+                                 : opt::run(*pipe.module);
     }
     if (!result.ok) {
         pipe.diagnostic += file + ": " + result.error + "\n";
@@ -959,6 +964,33 @@ bool parseAddress(const std::string& text, uint64_t& out) {
     }
     out = static_cast<uint64_t>(value);
     return true;
+}
+
+// `--codegen` names an emitter selection, never a target. An unknown
+// spelling is rejected here, before any front-end work, so a typo cannot
+// silently select the default.
+bool parseCodegenKind(const std::string& name, codegen::CodegenKind& out) {
+    if (name == "legacy") {
+        out = codegen::CodegenKind::Legacy;
+        return true;
+    }
+    if (name == "fast") {
+        out = codegen::CodegenKind::Fast;
+        return true;
+    }
+    return false;
+}
+
+// The cache identity names the emitter selection: an object built by one
+// backend must never be reused for another.
+const char* codegenName(codegen::CodegenKind kind) {
+    switch (kind) {
+        case codegen::CodegenKind::Legacy:
+            return "legacy";
+        case codegen::CodegenKind::Fast:
+            return "fast";
+    }
+    return "legacy";
 }
 
 struct ElfAudit {
@@ -1440,13 +1472,15 @@ bool discoverBuildGraph(const std::string& entryPath,
 }
 
 std::string cacheKeyFor(const BuildModule& module, target::Kind targetKind,
-                        bool noOpt, bool checks,
+                        codegen::CodegenKind codegenKind, bool noOpt,
+                        bool checks,
                         const std::map<std::string, BuildModule>& modules) {
     std::ostringstream manifest;
     manifest << "cider-build-cache: 1\n";
     manifest << "interface-format: " << interfacefmt::kFormatVersion << "\n";
     manifest << "compiler: " << interfacefmt::kCompilerTag << "\n";
     manifest << "target: " << target::info(targetKind).name << "\n";
+    manifest << "codegen: " << codegenName(codegenKind) << "\n";
     manifest << "module: " << module.name << "\n";
     manifest << "entry: " << (module.isEntry ? 1 : 0) << "\n";
     manifest << "source: " << module.sourceHash << "\n";
@@ -1489,9 +1523,10 @@ bool buildOneModule(BuildModule& module,
                     const std::map<std::string, BuildModule>& modules,
                     const std::string& cacheRoot,
                     const std::string& interfaceDir, target::Kind targetKind,
-                    bool noOpt, bool checks, bool verbose, std::string& out,
-                    std::string& error) {
-    module.cacheKey = cacheKeyFor(module, targetKind, noOpt, checks, modules);
+                    codegen::CodegenKind codegenKind, bool noOpt, bool checks,
+                    bool verbose, std::string& out, std::string& error) {
+    module.cacheKey =
+        cacheKeyFor(module, targetKind, codegenKind, noOpt, checks, modules);
     const std::string entries = joinPath(cacheRoot, "v1");
     const std::string entry = joinPath(entries, module.cacheKey);
     if (!ensureDirectory(entries, error) ||
@@ -1532,8 +1567,8 @@ bool buildOneModule(BuildModule& module,
             error = lowered.error;
             return false;
         }
-        codegen::EmitResult emitted =
-            codegen::emit(*pipe.module, targetKind, module.isEntry);
+        codegen::EmitResult emitted = codegen::emit(
+            *pipe.module, targetKind, codegenKind, module.isEntry);
         if (!emitted.ok) {
             error = codegenDiagnostic(emitted);
             return false;
@@ -1581,7 +1616,8 @@ bool buildOneModule(BuildModule& module,
 }
 
 int buildProgram(const std::string& input, const std::string& output,
-                 target::Kind targetKind, const std::string& cacheDir,
+                 target::Kind targetKind,
+                 codegen::CodegenKind codegenKind, const std::string& cacheDir,
                  const std::string& interfaceDirFlag,
                  const std::string& objectsDir, bool noLink, bool verbose,
                  bool noOpt, bool checks, std::string& out,
@@ -1621,7 +1657,8 @@ int buildProgram(const std::string& input, const std::string& output,
     }
     for (const std::string& name : order) {
         if (!buildOneModule(modules[name], modules, cacheRoot, activeDir,
-                            targetKind, noOpt, checks, verbose, out, err)) {
+                            targetKind, codegenKind, noOpt, checks, verbose,
+                            out, err)) {
             return 1;
         }
         BuildModule& module = modules[name];
@@ -1652,6 +1689,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
               "  compile -c <file> -o <file.o>  emit an ELF64 relocatable object\n"
               "  compile -c --no-entry <file>  emit a non-entry module object\n"
               "  compile -c --interface-dir <dir>  resolve imports from .cidm\n"
+              "  compile|run|build --codegen=legacy|fast  select the emitter\n"
               "  build [--cache-dir <dir>] [-o out] <entry.cid>\n"
               "  link [--target native|pomeos] [-o out] "
               "[--script <ld script>] [--base-address <addr>] <objects...>\n";
@@ -1670,6 +1708,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     }
 
     target::Kind targetKind = target::Kind::Native;
+    codegen::CodegenKind codegenKind = codegen::CodegenKind::Legacy;
     std::string output;
     std::string input;
     std::string script;
@@ -1677,6 +1716,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     std::vector<std::string> linkObjects;
     uint64_t baseAddress = 0;
     bool noOpt = false;
+    bool dumpPasses = false;
     bool checks = false;
     bool objectMode = false;
     bool noEntry = false;
@@ -1698,8 +1738,31 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
                 err = "unknown target '" + name + "'\n";
                 return 2;
             }
+        } else if (arg.rfind("--codegen=", 0) == 0 ||
+                   (arg == "--codegen" &&
+                    i + 1 < static_cast<uint64_t>(args.size()))) {
+            if (command != "compile" && command != "run" &&
+                command != "build") {
+                err = "flag '--codegen' is only valid for compile, run or "
+                      "build\n";
+                return 2;
+            }
+            const std::string name =
+                arg == "--codegen"
+                    ? args[++i]
+                    : arg.substr(std::string("--codegen=").size());
+            if (!parseCodegenKind(name, codegenKind)) {
+                err = "unknown codegen '" + name + "'\n";
+                return 2;
+            }
         } else if (arg == "--no-opt" && command != "link") {
             noOpt = true;
+        } else if (arg == "--dump-passes") {
+            if (command != "ir") {
+                err = "flag '--dump-passes' is only valid for ir\n";
+                return 2;
+            }
+            dumpPasses = true;
         } else if (arg == "--checks" && command != "link") {
             checks = true;
         } else if (arg == "-o" && i + 1 < static_cast<uint64_t>(args.size())) {
@@ -1828,9 +1891,9 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         if (output.empty()) {
             output = "a.out";
         }
-        return buildProgram(input, output, targetKind, cacheDir, interfaceDir,
-                            objectsDir, noLink, verbose, noOpt, checks, out,
-                            err);
+        return buildProgram(input, output, targetKind, codegenKind, cacheDir,
+                            interfaceDir, objectsDir, noLink, verbose, noOpt,
+                            checks, out, err);
     }
 
     if (noEntry && entryFlag) {
@@ -1896,6 +1959,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     FrontOptions opts;
     opts.targetKind = targetKind;
     opts.noOpt = noOpt;
+    opts.dumpPasses = dumpPasses;
     opts.checks = checks;
     opts.requireEntry = requireEntry;
     opts.wholeProgram = !split;
@@ -1920,7 +1984,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         return 0;
     }
     if (command == "ir") {
-        out = ir::dumpModule(*pipe.module);
+        out = pipe.passTrace + ir::dumpModule(*pipe.module);
         return 0;
     }
     if (targetKind == target::Kind::Vm) {
@@ -1953,7 +2017,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         return 1;
     }
     codegen::EmitResult emitted =
-        codegen::emit(*pipe.module, targetKind, requireEntry);
+        codegen::emit(*pipe.module, targetKind, codegenKind, requireEntry);
     if (!emitted.ok) {
         if (emitted.pos.file.empty()) {
             err = emitted.error + "\n";

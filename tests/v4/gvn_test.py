@@ -127,13 +127,17 @@ def main():
             else:
                 before_mul = op_count(before_loop, "mul")
                 after_mul = op_count(after_loop, "mul")
+                after_shl = op_count(after_loop, "shl")
                 if before_mul < 3:
                     failures.append(
                         "loop unoptimised has %d muls, expected at least 3" %
                         before_mul)
-                if after_mul != 2:
+                if after_mul != 0:
                     failures.append(
-                        "loop optimised has %d muls, expected 2" % after_mul)
+                        "loop optimised has %d muls, expected 0" % after_mul)
+                if after_shl != 2:
+                    failures.append(
+                        "loop optimised has %d shls, expected 2" % after_shl)
                 if " phi " not in after_loop:
                     failures.append("loop has no header phi")
 

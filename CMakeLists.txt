@@ -173,7 +173,9 @@ add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/licm.cpp src/opt/simplify.cpp
                                src/opt/blocks.cpp src/opt/strength.cpp
                                src/opt/philower.cpp src/opt/dce.cpp
-                               src/opt/dedup.cpp src/opt/opt.cpp)
+                               src/opt/sccp.cpp src/opt/dedup.cpp
+                               src/opt/alias.cpp src/opt/sroa.cpp
+                               src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 
@@ -191,6 +193,16 @@ add_executable(gvn_test tests/unit/gvn_test.cpp)
 target_link_libraries(gvn_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(gvn_test PRIVATE src)
 add_test(NAME gvn COMMAND gvn_test)
+
+add_executable(sccp_test tests/unit/sccp_test.cpp)
+target_link_libraries(sccp_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(sccp_test PRIVATE src)
+add_test(NAME sccp COMMAND sccp_test)
+
+add_executable(sroa_test tests/unit/sroa_test.cpp)
+target_link_libraries(sroa_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(sroa_test PRIVATE src)
+add_test(NAME sroa COMMAND sroa_test)
 
 add_executable(licm_test tests/unit/licm_test.cpp)
 target_link_libraries(licm_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
@@ -235,11 +247,16 @@ add_test(NAME vm COMMAND vm_test)
 # --- Codegen ---------------------------------------------------------------------
 #
 # LAYERS.md 3.7: checked IR to assembly. Reads the IR and the target, never the
-# AST (gate L2). Every value keeps a frame slot; a block-local linear scan may
-# home an eligible value in a caller-saved register for its local live range.
+# AST (gate L2). The default is a whole-function linear scan: an eligible value
+# is homed in a caller-saved or callee-saved register for its whole live range,
+# and everything else keeps its frame slot. The legacy block-local scan stays
+# compiled behind a compile-time switch for the Stage 1 gate comparison.
 
 add_library(cider_codegen STATIC src/codegen/codegen.cpp
-                                src/codegen/regalloc.cpp)
+                                src/codegen/frame.cpp
+                                src/codegen/regalloc.cpp
+                                src/codegen/linear_scan.cpp
+                                src/codegen/liveness.cpp)
 target_link_libraries(cider_codegen PUBLIC cider_ir cider_types cider_target)
 target_include_directories(cider_codegen PUBLIC src)
 
@@ -248,12 +265,34 @@ target_link_libraries(codegen_test PRIVATE cider_codegen cider_opt cider_lower c
 target_include_directories(codegen_test PRIVATE src)
 add_test(NAME codegen COMMAND codegen_test)
 
-# The local linear scan is an analysis; this test pins its refusal scope and
-# per-ABI pools without assembling anything.
+# The whole-function linear scan is the default allocator; this test pins its
+# refusal scope, pressure behavior, and per-ABI pools without assembling.
 add_executable(regalloc_test tests/unit/regalloc_test.cpp)
 target_link_libraries(regalloc_test PRIVATE cider_codegen cider_ir cider_types)
 target_include_directories(regalloc_test PRIVATE src)
 add_test(NAME regalloc COMMAND regalloc_test)
+
+# Whole-function liveness is a pure analysis: it answers live-in/live-out sets
+# and RPO live ranges, and changes no codegen behaviour by itself.
+add_executable(liveness_test tests/unit/liveness_test.cpp)
+target_link_libraries(liveness_test PRIVATE cider_codegen cider_ir cider_types)
+target_include_directories(liveness_test PRIVATE src)
+add_test(NAME liveness COMMAND liveness_test)
+
+# The whole-function linear scan is an analysis too: it consumes Liveness and
+# answers homes, spilling, and the callee-saved set without assembling anything.
+add_executable(linear_scan_test tests/unit/linear_scan_test.cpp)
+target_link_libraries(linear_scan_test PRIVATE cider_codegen cider_ir cider_types)
+target_include_directories(linear_scan_test PRIVATE src)
+add_test(NAME linear_scan COMMAND linear_scan_test)
+
+# Task 10's compact frame: only unhomed values, alloca cells, call words,
+# callee-save cells and the variadic area reserve bytes, and every offset is
+# disjoint and 16-byte framed.
+add_executable(frame_test tests/unit/frame_test.cpp)
+target_link_libraries(frame_test PRIVATE cider_codegen cider_ir cider_types)
+target_include_directories(frame_test PRIVATE src)
+add_test(NAME frame COMMAND frame_test)
 
 # --- The driver --------------------------------------------------------------------
 #
@@ -353,6 +392,60 @@ add_test(NAME v4_native_entry_alignment
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_SOURCE_DIR}/tests/v4/native_entry_alignment_test.py)
 set_tests_properties(v4_native_entry_alignment PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# The codegen selection flag: `legacy` and `fast` both compile today, and an
+# unknown value is rejected by name before any front-end work.
+add_test(NAME v4_codegen_flag
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/codegen_flag_test.py)
+set_tests_properties(v4_codegen_flag PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Task 10's compact fast frame: thirty locals and nested calls run on the
+# fast backend with and without the optimiser, and the fast assembly is not
+# byte-identical to the legacy emitter's.
+add_test(NAME v4_fast_frame
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_frame_test.py)
+set_tests_properties(v4_fast_frame PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Task 11's direct arithmetic and fused compares: homed results are written in
+# place instead of round-tripping through rax, branch-only compares branch on
+# flags, and every integer width keeps Cider's signed/unsigned semantics.
+add_test(NAME v4_fast_codegen
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_codegen_test.py)
+set_tests_properties(v4_fast_codegen PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Task 12's memory operands and float homes: width-correct narrow loads and
+# stores, GEP address folding, XMM float homes and spill/reload under float
+# pressure. The assembly-shape legs fail on the pre-Task-12 xmm0-only emitter.
+add_test(NAME v4_fast_memory
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_memory_test.py)
+set_tests_properties(v4_fast_memory PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Task 13's fast ABI: the call row, stack words, xmm/rax/rdx returns, C and
+# Cider varargs, div/rem and shift fixed registers, indirect calls, a full
+# caller-saved clobber, a 128-bit msabi xmm6-xmm15 save, and rsp alignment.
+add_test(NAME v4_fast_abi
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_abi_test.py)
+set_tests_properties(v4_fast_abi PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  SKIP_RETURN_CODE 77)
+
+# Task 15.1's fast parameter and call-word homes: the fast allocator no longer
+# excludes parameters or call argument words, and the prologue writes a
+# parameter's register home instead of its frame slot.
+add_test(NAME v4_fast_slot
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_slot_test.py)
+set_tests_properties(v4_fast_slot PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
 # Task 4's first optimizer slice: direct scalar slots forward and drop dead
@@ -494,6 +587,194 @@ set_tests_properties(v4_interfaces PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
   SKIP_RETURN_CODE 77)
 
+# Shared helper for the Stage 1.5 assembly-shape tests: compiles a source
+# string on the fast backend, extracts one function body from the Intel
+# assembly, and runs a source through a temporary file. The smoke test proves
+# the helper itself before later shape tests import it.
+add_test(NAME v4_backend_shape
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/backend_shape_test.py)
+set_tests_properties(v4_backend_shape PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 16.2's loop-carried homes: a value lowered from a loop phi is defined in
+# more than one block, so the allocator must keep one home across every
+# definition and mark each definition block present. The body must use no frame
+# cells and `loop_sum(5)` must exit 10 through the shared run helper.
+add_test(NAME v4_fast_loop
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_loop_test.py)
+set_tests_properties(v4_fast_loop PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 16.3's immediate and memory-operand selection: an unhomed 64-bit add
+# updates its frame destination in place, an immediate store writes the
+# destination directly at the declared width, and an immediate shift uses the
+# immediate form instead of staging the count in cl.
+add_test(NAME v4_fast_selection
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_selection_test.py)
+set_tests_properties(v4_fast_selection PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 16.4's out-of-line trap stubs: the hot path holds only a jump (or the
+# null-check branch), and the syscall/message/ud2 body is appended after the
+# last block so it cannot sit between a guard and the code it protects.
+add_test(NAME v4_fast_trap
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_trap_test.py)
+set_tests_properties(v4_fast_trap PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 16.5's fallthrough-aware branches: when a conditional terminator's
+# successor is the next block in emission order, the emitter inverts the
+# condition and falls through instead of emitting a redundant jump. No `jmp` or
+# conditional branch in `choose` may target the label that immediately follows
+# it.
+add_test(NAME v4_fast_branch
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_branch_test.py)
+set_tests_properties(v4_fast_branch PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 16.6's width-aware narrow loads: signed i8/i16 memory loads use one
+# 64-bit `movsx rax, BYTE/WORD PTR` and unsigned memory loads a single
+# zero-extending `movzx eax, BYTE/WORD PTR`, so no narrow memory load is
+# extended twice. Legacy keeps its two-step sequence. Narrow register-resident
+# parameters (`emitResidentParamLoad`) still use the two-step form; that
+# residual is tracked separately.
+add_test(NAME v4_fast_extension
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_extension_test.py)
+set_tests_properties(v4_fast_extension PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 17.3: fast integer loads write the allocator's home directly.
+add_test(NAME v4_fast_load_dest
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_load_dest_test.py)
+set_tests_properties(v4_fast_load_dest PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 17.4: fast resident-parameter loads write the result home directly.
+add_test(NAME v4_fast_resident_load
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_resident_load_test.py)
+set_tests_properties(v4_fast_resident_load PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 17.5: fast integer stores use the source home directly.
+add_test(NAME v4_fast_store_dest
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_store_dest_test.py)
+set_tests_properties(v4_fast_store_dest PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 17.6: fast constants, casts, and compares write their homes directly.
+add_test(NAME v4_fast_value_dest
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_value_dest_test.py)
+set_tests_properties(v4_fast_value_dest PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 18.3: fast boolean results (Not and integer compares) write the flag
+# byte and its zero extension in the allocator's GPR home, and a homed Not
+# source is tested in place instead of being staged through rax.
+add_test(NAME v4_fast_bool_home
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_bool_home_test.py)
+set_tests_properties(v4_fast_bool_home PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 18.2: a fast left-immediate add/multiply whose constant home is the
+# result home folds into `lea` / three-operand `imul`, eliding the constant
+# move. 8/16-bit multiplies, subtraction, division, compares, and floats stay
+# on their existing paths.
+add_test(NAME v4_fast_imm_fold
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_imm_fold_test.py)
+set_tests_properties(v4_fast_imm_fold PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 18.7: a fast `mov D, imm` whose home is dead after its first reader
+# folds into that consumer: arithmetic, compare, copy, and cast. A constant
+# with a second reader keeps its move; stores, address uses, and the
+# three-operand imul shape stay on their existing paths. Call argument words
+# are handled by the extension below.
+add_test(NAME v4_fast_imm_dead_home
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_imm_dead_home_test.py)
+set_tests_properties(v4_fast_imm_dead_home PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Correctness regression: immediate folds may only use a Cast's source value
+# when the cast preserves it. Narrowing and signed-to-unsigned widening casts
+# must stay on the register path; otherwise the fold silently uses the
+# untruncated/unconverted source immediate.
+add_test(NAME v4_fast_cast_preserve
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_cast_preserve_test.py)
+set_tests_properties(v4_fast_cast_preserve PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Residual correctness coverage from the optimization audit: narrow-width
+# live mentions keep their callee-save pair, a non-Ret last block never falls
+# through into the shared epilogue, and resident loads may reuse the parameter
+# home for the result.
+add_test(NAME v4_audit_residual
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/audit_residual_test.py)
+set_tests_properties(v4_audit_residual PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 18.7 extension: a dead fast `mov D, imm` whose first reader is a call
+# argument word stages the immediate into the ABI register instead of copying
+# the constant home. Multi-use constants, address-base uses, asm/volatile
+# barriers, and words past the register row keep their materialisation.
+add_test(NAME v4_fast_call_imm
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_call_imm_test.py)
+set_tests_properties(v4_fast_call_imm PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 17.9: a fast function with at least four returns stages each return
+# value and jumps to one shared epilogue, so the callee restores, frame
+# adjustment, `leave`, and `ret` are emitted once. One to three returns keep
+# the local per-return epilogue; legacy is unchanged.
+add_test(NAME v4_fast_epilogue
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_epilogue_test.py)
+set_tests_properties(v4_fast_epilogue PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
+# Task 18.8: after the fast immediate folds, a callee-save pair whose only
+# remaining body mention is a dead `mov reg, imm` is removed with that write.
+# Live homes, inline-asm functions (implicit clobbers), shared and per-return
+# epilogues, and legacy output are covered.
+add_test(NAME v4_fast_dead_callee_save
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/fast_dead_callee_save_test.py)
+set_tests_properties(v4_fast_dead_callee_save PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  TIMEOUT 300)
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the
@@ -506,7 +787,7 @@ add_test(NAME target COMMAND target_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline gvn licm simplify blocks codegen regalloc vm driver target
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise inline gvn sccp sroa licm simplify blocks codegen regalloc liveness linear_scan frame vm driver target
              PROPERTIES LABELS "gate")
 
 # --- Opt-in UEFI smoke ---------------------------------------------------------

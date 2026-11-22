@@ -3347,11 +3347,11 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
         return {undefined()};
     }
     if (place.hasIndirect) {
-        // The pointer is the source-level base of every computed access:
-        // *p, p[i], p.field, and a pointer-to-array index all arrive here.
-        // One guard before the chunk loop covers them all, and it runs
-        // before any address arithmetic, so nil+1 cannot slip past.
-        emitNonNull(pos, place.indirect);
+        // Guard the source-level base pointer, not a computed address. For
+        // p[i] the guard value is the loaded `p` (see pointerElementPlace);
+        // testing p+i would let a nil p with i>0 slip past as a non-zero
+        // address. Other indirects have no nullGuard and keep `indirect`.
+        emitNonNull(pos, place.nullGuard.value_or(place.indirect));
         if (failed_) {
             return {undefined()};
         }
@@ -3521,9 +3521,9 @@ void Lowerer::storeRange(Position pos, const Place& place,
         return;
     }
     if (place.hasIndirect) {
-        // Same guard as the load path: the pointer base is tested before
-        // the offset reaches any store.
-        emitNonNull(pos, place.indirect);
+        // Same guard as the load path: the base pointer is tested before
+        // the offset reaches any store (nil base + i>0 must trap).
+        emitNonNull(pos, place.nullGuard.value_or(place.indirect));
         if (failed_) {
             return;
         }
@@ -5198,6 +5198,9 @@ bool Lowerer::pointerElementPlace(const Index& n, const Place& base,
         return false;
     }
     ir::Value from = held[kFirstWord];
+    // The loaded base pointer is the value the null guard must test. Keep a
+    // pristine copy before the type is rewritten to the pointee pointer below.
+    ir::Value basePointer = from;
     if (elemBytes != 1) {
         ir::Value scaled =
             emitArith(BinOp::Mul, step, constantI64(elemBytes, count, n.pos),
@@ -5231,6 +5234,7 @@ bool Lowerer::pointerElementPlace(const Index& n, const Place& base,
     at.isVolatile = base.isVolatile;
     at.hasIndirect = true;
     at.indirect = addr;
+    at.nullGuard = basePointer;   // guard p, not the computed p+i
     return true;
 }
 

@@ -165,6 +165,18 @@ struct Ir {
         return instr;
     }
 
+    cider::ir::Instr cast(uint32_t id, cider::ir::Value source,
+                          cider::ir::IRType width, cider::TypeRef type) {
+        cider::ir::Instr instr;
+        instr.op = cider::ir::Op::Cast;
+        instr.width = width;
+        instr.type = type;
+        instr.isPure = true;
+        instr.results.push_back(value(id, width, type));
+        instr.operands.push_back(source);
+        return instr;
+    }
+
     void finishRet(uint32_t blockLabel, uint32_t id, cider::ir::IRType width,
                    cider::TypeRef type) {
         cider::ir::Terminator term;
@@ -704,13 +716,268 @@ void testOptionalRulesSkipped() {
     ir.finishRet(0, 12, cider::ir::IRType::I32, t);
     cider::opt::StrengthResult result = cider::opt::strengthReduce(ir.module);
     check(structurallyValid(ir.module), "the result is structurally valid");
-    check(result.reduced == 0, "no optional rule fires");
+    check(result.reduced == 1, "only the power-of-two Mul rule fires");
     check(instructionWithResult(*ir.fn, 10)->op == cider::ir::Op::Sub,
           "Sub 0,x is not rewritten to Neg");
     check(instructionWithResult(*ir.fn, 11)->op == cider::ir::Op::Xor,
           "Xor x,-1 is not rewritten to BitNot");
-    check(instructionWithResult(*ir.fn, 12)->op == cider::ir::Op::Mul,
-          "Mul x,2 is not rewritten to a shift");
+    check(instructionWithResult(*ir.fn, 12)->op == cider::ir::Op::Shl,
+          "Mul x,2 becomes Shl x,1");
+}
+
+void testUnsignedPow2RemainderToMask() {
+    std::printf("unsigned Rem x,2^k becomes And x,2^k-1; signed and zero stay\n");
+    Ir ir;
+    const cider::TypeRef u64 = ir.basic(cider::BasicKind::U64);
+    const cider::TypeRef i64 = ir.basic(cider::BasicKind::I64);
+    ir.param(200, cider::ir::IRType::U64, u64);
+    ir.param(201, cider::ir::IRType::I64, i64);
+    ir.param(202, cider::ir::IRType::I64, i64);
+    ir.emit(ir.constant(100, 64, cider::ir::IRType::U64, u64));
+    ir.emit(ir.constant(101, 64, cider::ir::IRType::I64, i64));
+    ir.emit(ir.constant(102, 0, cider::ir::IRType::I64, i64));
+    ir.emit(ir.binary(cider::ir::Op::Rem, 10,
+                      ir.value(200, cider::ir::IRType::U64, u64),
+                      ir.value(100, cider::ir::IRType::U64, u64),
+                      cider::ir::IRType::U64, u64));
+    ir.last().mayTrap = true;
+    ir.emit(ir.binary(cider::ir::Op::Rem, 11,
+                      ir.value(201, cider::ir::IRType::I64, i64),
+                      ir.value(101, cider::ir::IRType::I64, i64),
+                      cider::ir::IRType::I64, i64));
+    ir.last().mayTrap = true;
+    ir.emit(ir.binary(cider::ir::Op::Rem, 12,
+                      ir.value(202, cider::ir::IRType::I64, i64),
+                      ir.value(102, cider::ir::IRType::I64, i64),
+                      cider::ir::IRType::I64, i64));
+    ir.last().mayTrap = true;
+    ir.finishRet(0, 12, cider::ir::IRType::I64, i64);
+
+    cider::opt::StrengthResult result = cider::opt::strengthReduce(ir.module);
+    check(structurallyValid(ir.module), "the result is structurally valid");
+    check(result.reduced == 1, "only the unsigned power-of-two Rem is masked");
+    const cider::ir::Instr* masked = instructionWithResult(*ir.fn, 10);
+    check(masked != nullptr && masked->op == cider::ir::Op::And &&
+              !masked->mayTrap && masked->operands[0].id == 200 &&
+              masked->operands[1].id == 100,
+          "unsigned Rem x,64 becomes a non-trapping And x,63 at U64");
+    const cider::ir::Instr* mask = instructionWithResult(*ir.fn, 100);
+    check(mask != nullptr && mask->op == cider::ir::Op::Const &&
+              mask->constantBits == 63,
+          "the replacement mask constant is 63");
+    const cider::ir::Instr* signedRem = instructionWithResult(*ir.fn, 11);
+    check(signedRem != nullptr && signedRem->op == cider::ir::Op::Rem &&
+              signedRem->mayTrap,
+          "signed Rem x,64 stays a trapping Rem");
+    const cider::ir::Instr* zeroRem = instructionWithResult(*ir.fn, 12);
+    check(zeroRem != nullptr && zeroRem->op == cider::ir::Op::Rem &&
+              zeroRem->mayTrap,
+          "Rem x,0 stays a trapping Rem");
+}
+
+// The divisor of an unsigned power-of-two Rem may be a single-use Cast of a
+// shared integer Const (the hash_map shape), or a Const read by several users.
+// Neither may be mutated; the rewrite must build a fresh mask constant.
+void testPow2RemainderThroughCastAndSharedConst() {
+    std::printf("unsigned pow2 Rem sees a cast divisor and a shared constant\n");
+    // (1) const i32 64 -> cast u64 -> rem u64, with the source Const also read
+    // by a signed comparison. The Cast is single-use; the Const is not.
+    {
+        Ir ir;
+        const cider::TypeRef i32 = ir.i32();
+        const cider::TypeRef u64 = ir.basic(cider::BasicKind::U64);
+        ir.param(0, cider::ir::IRType::U64, u64);
+        ir.emit(ir.constant(1, 64, cider::ir::IRType::I32, i32));
+        ir.emit(ir.cast(2, ir.value(1, cider::ir::IRType::I32, i32),
+                        cider::ir::IRType::U64, u64));
+        // The lowerer's `as` path leaves `isPure` clear on a Cast even though
+        // it is a side-effect-free conversion: mirror that real shape.
+        ir.last().isPure = false;
+        ir.emit(ir.binary(cider::ir::Op::Rem, 10,
+                          ir.value(0, cider::ir::IRType::U64, u64),
+                          ir.value(2, cider::ir::IRType::U64, u64),
+                          cider::ir::IRType::U64, u64));
+        ir.last().mayTrap = true;
+        // A second, signed use of the source constant keeps it multi-use.
+        ir.param(3, cider::ir::IRType::I32, i32);
+        ir.emit(ir.binary(cider::ir::Op::Rem, 11,
+                          ir.value(3, cider::ir::IRType::I32, i32),
+                          ir.value(1, cider::ir::IRType::I32, i32),
+                          cider::ir::IRType::I32, i32));
+        ir.last().mayTrap = true;
+        ir.finishRet(0, 10, cider::ir::IRType::U64, u64);
+
+        cider::opt::StrengthResult result = cider::opt::strengthReduce(ir.module);
+        check(structurallyValid(ir.module),
+              "the cast-divisor result is structurally valid");
+        check(result.reduced == 1, "only the unsigned cast-divisor Rem is masked");
+        const cider::ir::Instr* masked = instructionWithResult(*ir.fn, 10);
+        check(masked != nullptr && masked->op == cider::ir::Op::And &&
+                  !masked->mayTrap && masked->operands[0].id == 0 &&
+                  masked->operands[1].id == 2,
+              "the cast-divisor Rem becomes And x, (new mask)");
+        const cider::ir::Instr* mask = instructionWithResult(*ir.fn, 2);
+        check(mask != nullptr && mask->op == cider::ir::Op::Const &&
+                  mask->constantBits == 63 &&
+                  mask->width == cider::ir::IRType::U64 && mask->type == u64 &&
+                  mask->isPure && !mask->mayTrap && !mask->isVolatile,
+              "the single-use Cast becomes a U64 Const 63");
+        const cider::ir::Instr* src = instructionWithResult(*ir.fn, 1);
+        check(src != nullptr && src->op == cider::ir::Op::Const &&
+                  src->constantBits == 64,
+              "the shared source Const is left untouched");
+        const cider::ir::Instr* signedRem = instructionWithResult(*ir.fn, 11);
+        check(signedRem != nullptr && signedRem->op == cider::ir::Op::Rem &&
+                  signedRem->mayTrap,
+              "the signed Rem that shares the Const stays trapping");
+    }
+
+    // (2) const u64 64 with two unsigned Rem users. Mutating it is wrong; each
+    // user must get a fresh Const mask placed immediately before it.
+    {
+        Ir ir;
+        const cider::TypeRef u64 = ir.basic(cider::BasicKind::U64);
+        ir.param(0, cider::ir::IRType::U64, u64);
+        ir.emit(ir.constant(1, 64, cider::ir::IRType::U64, u64));
+        ir.emit(ir.binary(cider::ir::Op::Rem, 10,
+                          ir.value(0, cider::ir::IRType::U64, u64),
+                          ir.value(1, cider::ir::IRType::U64, u64),
+                          cider::ir::IRType::U64, u64));
+        ir.last().mayTrap = true;
+        ir.emit(ir.binary(cider::ir::Op::Rem, 11,
+                          ir.value(0, cider::ir::IRType::U64, u64),
+                          ir.value(1, cider::ir::IRType::U64, u64),
+                          cider::ir::IRType::U64, u64));
+        ir.last().mayTrap = true;
+        ir.finishRet(0, 11, cider::ir::IRType::U64, u64);
+
+        cider::opt::StrengthResult result = cider::opt::strengthReduce(ir.module);
+        check(structurallyValid(ir.module),
+              "the shared-constant result is structurally valid");
+        check(result.reduced == 2,
+              "both unsigned Rems of a shared Const are masked");
+        const cider::ir::Instr* src = instructionWithResult(*ir.fn, 1);
+        check(src != nullptr && src->op == cider::ir::Op::Const &&
+                  src->constantBits == 64,
+              "the shared Const keeps its original 64");
+        const cider::ir::Block& block = ir.fn->blocks.front();
+        uint32_t freshIds[2] = {0, 0};
+        for (uint32_t n = 0; n < 2; ++n) {
+            const uint32_t remId = 10 + n;
+            const cider::ir::Instr* rem = instructionWithResult(*ir.fn, remId);
+            check(rem != nullptr && rem->op == cider::ir::Op::And &&
+                      !rem->mayTrap && rem->operands[1].id != 1,
+                  "shared-constant Rem " + std::to_string(remId) +
+                      " uses a fresh mask, not the shared Const");
+            freshIds[n] = rem == nullptr ? 0 : rem->operands[1].id;
+            uint64_t at = block.body.size();
+            for (uint64_t i = 0; i < block.body.size(); ++i) {
+                for (const cider::ir::Value& v : block.body[i].results) {
+                    if (v.id == remId) at = i;
+                }
+            }
+            check(at > 0 && at < block.body.size() &&
+                      block.body[at - 1].op == cider::ir::Op::Const &&
+                      block.body[at - 1].constantBits == 63 &&
+                      block.body[at - 1].results.size() == 1 &&
+                      block.body[at - 1].results[0].id == freshIds[n] &&
+                      block.body[at - 1].width == cider::ir::IRType::U64 &&
+                      block.body[at - 1].type == u64,
+                  "a U64 Const 63 is placed right before Rem " +
+                      std::to_string(remId));
+        }
+        check(freshIds[0] != 0 && freshIds[1] != 0 &&
+                  freshIds[0] != freshIds[1],
+              "the two fresh masks have distinct ids");
+    }
+}
+
+void testSignedNegativePow2Refusal() {
+    std::printf("a signed divisor is not proven non-negative, so Rem stays\n");
+    Ir ir;
+    cider::TypeRef t = ir.i32();
+    ir.param(200, cider::ir::IRType::I32, t);
+    ir.emit(ir.constant(100, 8, cider::ir::IRType::I32, t));
+    ir.emit(ir.binary(cider::ir::Op::Rem, 10,
+                      ir.value(200, cider::ir::IRType::I32, t),
+                      ir.value(100, cider::ir::IRType::I32, t),
+                      cider::ir::IRType::I32, t));
+    ir.last().mayTrap = true;
+    ir.finishRet(0, 10, cider::ir::IRType::I32, t);
+
+    cider::opt::StrengthResult result = cider::opt::strengthReduce(ir.module);
+    check(result.reduced == 0, "no rule fires on a signed remainder");
+    const cider::ir::Instr* instr = instructionWithResult(*ir.fn, 10);
+    check(instr != nullptr && instr->op == cider::ir::Op::Rem,
+          "I32 Rem x,8 stays a Rem");
+    check(instr != nullptr && instr->mayTrap,
+          "the refused signed Rem keeps mayTrap");
+}
+
+void testMulPow2WidthsAndFloatRefusal() {
+    std::printf("Mul x,2^k lowers only at 32/64-bit integer widths\n");
+    struct MulCase {
+        uint32_t param;
+        uint32_t constant;
+        uint32_t result;
+        int64_t bits;
+        cider::ir::IRType width;
+        cider::TypeRef type;
+        bool lowered;
+    };
+    Ir ir;
+    const cider::TypeRef u32 = ir.basic(cider::BasicKind::U32);
+    const cider::TypeRef u64 = ir.basic(cider::BasicKind::U64);
+    const cider::TypeRef i32 = ir.i32();
+    const cider::TypeRef i64 = ir.basic(cider::BasicKind::I64);
+    const cider::TypeRef u8 = ir.basic(cider::BasicKind::U8);
+    const cider::TypeRef i8 = ir.basic(cider::BasicKind::I8);
+    const cider::TypeRef u16 = ir.basic(cider::BasicKind::U16);
+    const cider::TypeRef f32 = ir.f32();
+    const std::vector<MulCase> cases = {
+        {200, 100, 10, 2, cider::ir::IRType::U32, u32, true},
+        {201, 101, 11, 2, cider::ir::IRType::U64, u64, true},
+        {202, 102, 12, 2, cider::ir::IRType::I32, i32, true},
+        {203, 103, 13, 2, cider::ir::IRType::I64, i64, true},
+        {204, 104, 14, 2, cider::ir::IRType::U8, u8, false},
+        {205, 105, 15, 2, cider::ir::IRType::I8, i8, false},
+        {206, 106, 16, 2, cider::ir::IRType::U16, u16, false},
+        {207, 107, 17, 3, cider::ir::IRType::I32, i32, false},
+        {208, 108, 18, 2, cider::ir::IRType::F32, f32, false},
+    };
+    for (const MulCase& c : cases) {
+        ir.param(c.param, c.width, c.type);
+        ir.emit(ir.constant(c.constant, c.bits, c.width, c.type));
+        ir.emit(ir.binary(cider::ir::Op::Mul, c.result,
+                          ir.value(c.param, c.width, c.type),
+                          ir.value(c.constant, c.width, c.type),
+                          c.width, c.type));
+    }
+    ir.finishRet(0, 18, cider::ir::IRType::F32, f32);
+
+    cider::opt::StrengthResult result = cider::opt::strengthReduce(ir.module);
+    check(structurallyValid(ir.module), "the result is structurally valid");
+    check(result.reduced == 4, "four power-of-two multiplies become shifts");
+    for (const MulCase& c : cases) {
+        const std::string at = std::string(cider::ir::irTypeName(c.width)) +
+                               " result " + std::to_string(c.result);
+        const cider::ir::Instr* instr = instructionWithResult(*ir.fn, c.result);
+        if (c.lowered) {
+            check(instr != nullptr && instr->op == cider::ir::Op::Shl &&
+                      instr->width == c.width && instr->type == c.type &&
+                      instr->results[0].width == c.width &&
+                      instr->results[0].type == c.type,
+                  "the " + at + " is a Shl with its original result Value");
+            const cider::ir::Instr* amount =
+                instructionWithResult(*ir.fn, c.constant);
+            check(instr != nullptr && instr->operands[1].id == c.constant &&
+                      amount != nullptr && amount->constantBits == 1,
+                  "the " + at + " shifts by 1");
+        } else {
+            check(instr != nullptr && instr->op == cider::ir::Op::Mul,
+                  "the " + at + " stays a Mul");
+        }
+    }
 }
 
 void testFieldsCleared() {
@@ -892,6 +1159,10 @@ int main() {
     testCopyChainConstants();
     testFixpoint();
     testOptionalRulesSkipped();
+    testUnsignedPow2RemainderToMask();
+    testPow2RemainderThroughCastAndSharedConst();
+    testSignedNegativePow2Refusal();
+    testMulPow2WidthsAndFloatRefusal();
     testFieldsCleared();
     testTrappingOperandSurvives();
     testDeterminism();

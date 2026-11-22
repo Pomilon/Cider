@@ -119,6 +119,25 @@ const char* opName(Op op) {
     return "unreachable";
 }
 
+namespace {
+
+// File-local: terminator kind spelling for the lossless IR dump. No public
+// API. Exhaustive with no `default:`, so a new Term breaks the build here
+// rather than printing an empty kind in a dump.
+const char* termName(Term term) {
+    switch (term) {
+        case Term::Ret: return "ret";
+        case Term::Br: return "br";
+        case Term::CondBr: return "condbr";
+        case Term::Switch: return "switch";
+        case Term::Unreachable: return "unreachable";
+        case Term::Trap: return "trap";
+    }
+    return "unreachable";
+}
+
+}  // namespace
+
 std::string dumpModule(const Module& module) {
     std::string out = "module " + module.name + "\n";
     for (const Global& global : module.globals) {
@@ -148,8 +167,60 @@ std::string dumpModule(const Module& module) {
                 if (!instr.callee.empty()) {
                     out += " @" + instr.callee;
                 }
+                // Lossless dump: Load/Store carry their address base (and,
+                // for Store, the stored value) as clearly-marked suffixes.
+                // `#` is unused elsewhere in the dump; these are value ids,
+                // not numeric constants (displacement stays out of scope).
+                // Additive: every pre-existing field is byte-identical.
+                if (instr.op == Op::Load || instr.op == Op::Store) {
+                    out += " #addr %" + std::to_string(instr.addressBase.id);
+                    if (instr.op == Op::Store) {
+                        out += " #stored %" + std::to_string(instr.storedValue.id);
+                    }
+                }
+                // Lossless dump: a call carries its already-typed argument
+                // words after a `|` token per argument, so a value used only
+                // as a call argument is visible to the cost model. Additive —
+                // non-call instructions (and every pre-existing field) are
+                // unchanged, so byte-identity dumps stay byte-identical.
+                if (instr.op == Op::Call) {
+                    for (const Argument& arg : instr.arguments) {
+                        out += " |";
+                        for (const Value& word : arg.words) {
+                            out += " %" + std::to_string(word.id);
+                        }
+                    }
+                }
                 out += "\n";
             }
+            // Lossless dump: one terminator line per block, after its
+            // instructions. A new line kind consumed by the cost model
+            // parser; it lists every value-bearing id of the terminator.
+            out += "  term ";
+            out += termName(block.term.term);
+            switch (block.term.term) {
+                case Term::Ret:
+                    for (const Value& value : block.term.values) {
+                        out += " %" + std::to_string(value.id);
+                    }
+                    break;
+                case Term::CondBr:
+                    if (block.term.cond.has_value()) {
+                        out += " %" + std::to_string(block.term.cond->id);
+                    }
+                    break;
+                case Term::Switch:
+                    out += " %" + std::to_string(block.term.switchValue.id);
+                    for (const Case& c : block.term.cases) {
+                        out += " %" + std::to_string(c.value.id);
+                    }
+                    break;
+                case Term::Br:
+                case Term::Unreachable:
+                case Term::Trap:
+                    break;
+            }
+            out += "\n";
         }
     }
     return out;

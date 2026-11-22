@@ -750,7 +750,9 @@ void testMem2RegEscape() {
     if (fn == nullptr) {
         return;
     }
-    check(r.opt.promoted == 0, "the escaped frame is not promoted");
+    // mem2reg taints per-slot now: `x` escapes (its address is taken) so it
+    // stays in memory, but other non-escaping allocas in the same function may
+    // legitimately promote. Assert the escaped slot stays, not the global count.
     check(countOp(*fn, cider::ir::Op::Alloca) >= 1, "the Alloca stays");
     check(countOp(*fn, cider::ir::Op::Load) >= 1, "the load stays");
     check(countOp(*fn, cider::ir::Op::Store) >= 1, "the store stays");
@@ -834,7 +836,7 @@ void testMem2RegAggregate() {
     if (fn == nullptr) {
         return;
     }
-    check(r.opt.promoted == 0, "the aggregate frame is not promoted");
+    // Per-slot taint: the aggregate slot stays in memory, other slots may promote.
     check(countOp(*fn, cider::ir::Op::Alloca) >= 1, "the Alloca stays");
     check(countOp(*fn, cider::ir::Op::Load) >= 1, "the field load stays");
 }
@@ -1735,6 +1737,126 @@ void testDisplacementEscapes() {
     check(countOp(*ir.fn, cider::ir::Op::Load) == 1, "the load stays");
 }
 
+struct SwitchIr {
+    cider::TypeContext types;
+    cider::ir::Module module;
+    cider::ir::Function* fn = nullptr;
+    SwitchIr() {
+        module.name = "test";
+        cider::ir::Function f;
+        f.name = "f";
+        cider::ir::Block b;
+        b.label = 0;
+        f.blocks.push_back(std::move(b));
+        module.functions.push_back(std::move(f));
+        fn = &module.functions.back();
+    }
+    cider::TypeRef i32() {
+        return cider::TypeRef{types.basic(cider::BasicKind::I32)};
+    }
+    cider::ir::Value value(uint32_t id, cider::ir::IRType w, cider::TypeRef t) {
+        cider::ir::Value v; v.id = id; v.width = w; v.type = t; return v;
+    }
+    void emit(cider::ir::Instr i) { fn->blocks.front().body.push_back(std::move(i)); }
+    cider::ir::Instr constant(uint32_t id, int64_t bits) {
+        cider::ir::Instr i;
+        i.op = cider::ir::Op::Const; i.width = cider::ir::IRType::I32;
+        i.type = i32(); i.constantBits = bits; i.isPure = true;
+        i.results.push_back(value(id, i.width, i.type)); return i;
+    }
+    // Mirrors Ir::constant so the fixpoint test can state width and type
+    // explicitly; the two-argument form above stays for the Task 2 test.
+    cider::ir::Instr constant(uint32_t id, int64_t bits,
+                              cider::ir::IRType width, cider::TypeRef type) {
+        cider::ir::Instr i;
+        i.op = cider::ir::Op::Const; i.width = width;
+        i.type = type; i.constantBits = bits;
+        i.constantText = std::to_string(bits); i.isPure = true;
+        i.results.push_back(value(id, width, type)); return i;
+    }
+    void finishBr(uint32_t label, uint32_t target) {
+        for (cider::ir::Block& b : fn->blocks) {
+            if (b.label == label) {
+                b.term.term = cider::ir::Term::Br;
+                b.term.target = target;
+                return;
+            }
+        }
+    }
+};
+
+void testSwitchCaseValueKeepsDefinition() {
+    std::printf("switch case values are uses\n");
+    SwitchIr ir;
+    cider::TypeRef t = ir.i32();
+    // The switch scrutinee is a distinct, already-defined value (a parameter),
+    // so the case label is the *sole* use of id 1. Without this distinction the
+    // existing `used.insert(term.switchValue.id)` keeps the const alive on its
+    // own and the test cannot detect the missing case-value use.
+    ir.fn->params.push_back(ir.value(2, cider::ir::IRType::I32, t));
+    ir.emit(ir.constant(1, 7));          // the sole definition of id 1
+    ir.fn->blocks.front().term.term = cider::ir::Term::Switch;
+    ir.fn->blocks.front().term.switchValue =
+        ir.value(2, cider::ir::IRType::I32, t);
+    cider::ir::Case arm;
+    arm.value = ir.value(1, cider::ir::IRType::I32, t);
+    arm.target = 0;
+    ir.fn->blocks.front().term.cases.push_back(arm);
+    ir.fn->blocks.front().term.defaultTarget = 0;
+
+    const uint64_t removed = cider::opt::deadCode(ir.module);
+    bool found = false;
+    for (const cider::ir::Instr& i : ir.fn->blocks.front().body) {
+        if (!i.results.empty() && i.results[0].id == 1) {
+            found = true;
+        }
+    }
+    check(found, "the switch case keeps the const alive");
+    check(removed == 0, "DCE reports no removal");
+    check(cider::opt::checkModule(ir.module).empty(),
+          "the result is structurally valid");
+}
+
+void testFoldConstsCrossBlockFixpoint() {
+    std::printf("foldConsts repeats until no new constant appears\n");
+    SwitchIr ir;
+    cider::TypeRef t = ir.i32();
+    ir.emit(ir.constant(2, 1, cider::ir::IRType::I32, t));
+    ir.emit(ir.constant(3, 2, cider::ir::IRType::I32, t));
+    ir.finishBr(0, 3);
+    // Block 2 appears before block 3 in module order but is dominated by it.
+    cider::ir::Block b2;
+    b2.label = 2;
+    b2.term.term = cider::ir::Term::Ret;
+    b2.term.values.push_back(ir.value(5, cider::ir::IRType::I32, t));
+    ir.fn->blocks.push_back(std::move(b2));
+    cider::ir::Block b3;
+    b3.label = 3;
+    b3.term.term = cider::ir::Term::Br;
+    b3.term.target = 2;
+    ir.fn->blocks.push_back(std::move(b3));
+    ir.fn = nullptr;
+    cider::ir::Function& f = ir.module.functions.front();
+    auto mkAdd = [&](uint32_t id, uint32_t a, uint32_t b) {
+        cider::ir::Instr in;
+        in.op = cider::ir::Op::Add;
+        in.width = cider::ir::IRType::I32;
+        in.type = t;
+        in.isPure = true;
+        in.results.push_back(ir.value(id, cider::ir::IRType::I32, t));
+        in.operands.push_back(ir.value(a, cider::ir::IRType::I32, t));
+        in.operands.push_back(ir.value(b, cider::ir::IRType::I32, t));
+        return in;
+    };
+    f.blocks[1].body.push_back(mkAdd(5, 4, 2));   // needs id 4 from block 3
+    f.blocks[2].body.push_back(mkAdd(4, 2, 3));   // folds on sweep 1
+
+    const uint64_t folded = cider::opt::foldConsts(ir.module);
+    check(folded == 2, "both adds fold across two sweeps");
+    check(cider::opt::checkModule(ir.module).empty(),
+          "the result is structurally valid");
+}
+
 }  // namespace
 
 // VARIADICS.md §8: the va operations are opaque to the optimiser. VaCopy's
@@ -1872,6 +1994,8 @@ int main() {
     testRodataDedupAddressIdentity();
     testRodataDedupDeterministic();
     testDisplacementEscapes();
+    testSwitchCaseValueKeepsDefinition();
+    testFoldConstsCrossBlockFixpoint();
     testDanglingTarget();
     testUnterminatedBlock();
     testUndefinedOperand();

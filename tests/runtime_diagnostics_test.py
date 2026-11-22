@@ -102,6 +102,17 @@ def nil_pointer_store():
 """
 
 
+def nil_pointer_index():
+    # CIDER-BUG: p[i] guarded the COMPUTED address p+i, not the base p, so a
+    # nil base with a non-zero index produced address 4 (non-zero), slipped
+    # past the trap, and faulted with SIGSEGV instead of a diagnosed trap.
+    return """func main() -> int {
+  var p: *int = nilPtr;
+  return p[1];
+}
+"""
+
+
 def nil_interface():
     return """interface Shape {
   func kind() -> int;
@@ -217,6 +228,7 @@ def main():
     h = Harness()
     try:
         h.run_legs("nil pointer read", h.source("nil_ptr_read.cid", nil_pointer_read()), NULL_DEREF)
+        h.run_legs("nil pointer index", h.source("nil_ptr_index.cid", nil_pointer_index()), NULL_DEREF)
         h.run_legs("nil pointer store", h.source("nil_ptr_store.cid", nil_pointer_store()), NULL_DEREF)
         h.run_legs("nil interface dispatch", h.source("nil_iface.cid", nil_interface()), NIL_IFACE)
         h.run_legs("nil function pointer", h.source("nil_fnptr.cid", nil_fnptr()), NIL_FNPTR)

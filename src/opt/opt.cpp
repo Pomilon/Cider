@@ -281,26 +281,37 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
 uint64_t foldConsts(ir::Module& module) {
     uint64_t folded = 0;
     for (ir::Function& fn : module.functions) {
+        // The map is monotone: folding only turns instructions into Const,
+        // and Const definitions are never removed, so constants learned in
+        // one sweep (possibly in a block that follows their use in module
+        // order) stay available to the next sweep until no new fold occurs.
         std::unordered_map<uint32_t, int64_t> consts;
-        for (ir::Block& block : fn.blocks) {
-            for (ir::Instr& instr : block.body) {
-                if (instr.op == ir::Op::Const && !instr.results.empty()) {
-                    consts[instr.results[0].id] = instr.constantBits;
-                    continue;
+        for (;;) {
+            uint64_t round = 0;
+            for (ir::Block& block : fn.blocks) {
+                for (ir::Instr& instr : block.body) {
+                    if (instr.op == ir::Op::Const && !instr.results.empty()) {
+                        consts[instr.results[0].id] = instr.constantBits;
+                        continue;
+                    }
+                    std::optional<int64_t> value = foldOne(instr, consts);
+                    if (!value.has_value() || instr.results.empty()) {
+                        continue;
+                    }
+                    instr.op = ir::Op::Const;
+                    instr.operands.clear();
+                    instr.arguments.clear();
+                    instr.constantBits = *value;
+                    instr.constantText = std::to_string(*value);
+                    instr.mayTrap = false;
+                    instr.isPure = true;
+                    consts[instr.results[0].id] = *value;
+                    ++round;
+                    ++folded;
                 }
-                std::optional<int64_t> value = foldOne(instr, consts);
-                if (!value.has_value() || instr.results.empty()) {
-                    continue;
-                }
-                instr.op = ir::Op::Const;
-                instr.operands.clear();
-                instr.arguments.clear();
-                instr.constantBits = *value;
-                instr.constantText = std::to_string(*value);
-                instr.mayTrap = false;
-                instr.isPure = true;
-                consts[instr.results[0].id] = *value;
-                ++folded;
+            }
+            if (round == 0) {
+                break;
             }
         }
     }
@@ -357,6 +368,11 @@ uint64_t deadCode(ir::Module& module) {
                 }
                 if (term.term == ir::Term::Switch) {
                     used.insert(term.switchValue.id);
+                    // A case label is a semantic use of its value: dropping it
+                    // would delete a definition the switch still compares.
+                    for (const ir::Case& arm : term.cases) {
+                        used.insert(arm.value.id);
+                    }
                 }
             }
             // Slots no load reads: a store there changes nothing observable,
@@ -477,7 +493,7 @@ uint64_t deadCode(ir::Module& module) {
     return removed;
 }
 
-OptResult run(ir::Module& module) {
+OptResult run(ir::Module& module, std::string* trace) {
     std::vector<StructuralError> bad = checkModule(module);
     if (!bad.empty()) {
         const StructuralError& first = bad[0];
@@ -487,10 +503,25 @@ OptResult run(ir::Module& module) {
                          0, 0};
     }
     OptResult result{true, "", 0, 0};
+    auto tracePass = [&](const char* name) {
+        if (trace == nullptr) {
+            return;
+        }
+        *trace += "== ";
+        *trace += name;
+        *trace += " ==\n";
+        *trace += "folded=" + std::to_string(result.folded) +
+                  " removed=" + std::to_string(result.removed) +
+                  " inlined=" + std::to_string(result.inlined) +
+                  " hoisted=" + std::to_string(result.licmHoisted) + "\n";
+        *trace += ir::dumpModule(module);
+    };
+    tracePass("checkModule");
     InlineResult inlining = inlineCalls(module);
     result.inlined = inlining.inlined;
     result.clonedInstructions = inlining.clonedInstructions;
     result.inliningSkipped = inlining.skipped;
+    tracePass("inlineCalls");
     bad = checkModule(module);
     if (!bad.empty()) {
         const StructuralError& first = bad[0];
@@ -504,11 +535,28 @@ OptResult run(ir::Module& module) {
     result.phis = promotion.phisInserted;
     result.loadsPromoted = promotion.loadsReplaced;
     result.storesPromoted = promotion.storesRemoved;
+    tracePass("mem2reg");
+    SroaResult sroaResult = sroa(module);
+    result.sroaSlots = sroaResult.slotsScalarized;
+    result.sroaFields = sroaResult.fieldsPromoted;
+    result.sroaLoads = sroaResult.loadsRemoved;
+    result.sroaStores = sroaResult.storesRemoved;
+    bad = checkModule(module);
+    if (!bad.empty()) {
+        const StructuralError& first = bad[0];
+        result.ok = false;
+        result.error = "after sroa " + first.function + ":" +
+                       std::to_string(first.block) + ": " + first.message;
+        return result;
+    }
+    tracePass("sroa");
     result.folded = foldConsts(module);
+    tracePass("foldConsts");
     StrengthResult strength = strengthReduce(module);
     result.strengthReduced = strength.reduced;
     result.strengthCopies = strength.copies;
     result.strengthConstants = strength.constants;
+    tracePass("strengthReduce");
     bad = checkModule(module);
     if (!bad.empty()) {
         const StructuralError& first = bad[0];
@@ -517,11 +565,36 @@ OptResult run(ir::Module& module) {
                        std::to_string(first.block) + ": " + first.message;
         return result;
     }
+    SccpResult sccpResult = sccp(module);
+    result.sccpConstants = sccpResult.constantsReplaced;
+    result.sccpBranches = sccpResult.branchesFolded;
+    result.sccpBlocks = sccpResult.blocksRemoved;
+    result.sccpPhis = sccpResult.phisSimplified;
+    // The legacy counters report all work of this kind in the pipeline, not
+    // just simplifyControlFlow's share: SCCP now runs first and can fold a
+    // branch, drop a block or collapse a phi before simplify sees them.
+    result.branchesFolded = sccpResult.branchesFolded;
+    result.blocksRemoved = sccpResult.blocksRemoved;
+    result.phisSimplified = sccpResult.phisSimplified;
+    bad = checkModule(module);
+    if (!bad.empty()) {
+        const StructuralError& first = bad[0];
+        result.ok = false;
+        result.error = "after sccp " + first.function + ":" +
+                       std::to_string(first.block) + ": " + first.message;
+        return result;
+    }
+    tracePass("sccp");
     SimplifyResult simplify = simplifyControlFlow(module);
-    result.branchesFolded = simplify.branchesFolded;
-    result.blocksRemoved = simplify.blocksRemoved;
-    result.phisSimplified = simplify.phisSimplified;
-    result.phiIncomingRemoved = simplify.phiIncomingRemoved;
+    // SCCP runs before this pass and can already fold a constant branch, drop
+    // its unreachable successor, or collapse a lone phi. Report the pipeline
+    // total rather than only this pass's share, so the counters keep meaning
+    // "work done by the pipeline" whichever pass happened to do it.
+    result.branchesFolded += simplify.branchesFolded;
+    result.blocksRemoved += simplify.blocksRemoved;
+    result.phisSimplified += simplify.phisSimplified;
+    result.phiIncomingRemoved += simplify.phiIncomingRemoved;
+    tracePass("simplifyControlFlow");
     bad = checkModule(module);
     if (!bad.empty()) {
         const StructuralError& first = bad[0];
@@ -533,6 +606,7 @@ OptResult run(ir::Module& module) {
     BlocksResult blocks = cleanupBlocks(module);
     result.emptyBlocksRemoved = blocks.emptyBlocksRemoved;
     result.blocksMerged = blocks.blocksMerged;
+    tracePass("cleanupBlocks");
     bad = checkModule(module);
     if (!bad.empty()) {
         const StructuralError& first = bad[0];
@@ -545,6 +619,7 @@ OptResult run(ir::Module& module) {
     result.expressionsRemoved = gvn.expressionsRemoved;
     result.usesRedirected = gvn.usesRedirected;
     result.copiesCollapsed = gvn.copiesCollapsed;
+    tracePass("valueNumber");
     bad = checkModule(module);
     if (!bad.empty()) {
         const StructuralError& first = bad[0];
@@ -557,6 +632,7 @@ OptResult run(ir::Module& module) {
     result.licmLoops = licm.loops;
     result.licmHoisted = licm.hoisted;
     result.licmSkipped = licm.skipped;
+    tracePass("loopInvariantCodeMotion");
     bad = checkModule(module);
     if (!bad.empty()) {
         const StructuralError& first = bad[0];
@@ -569,6 +645,7 @@ OptResult run(ir::Module& module) {
     result.forwarded = memory.forwarded;
     result.storesRemoved = memory.storesRemoved;
     result.removed = deadCode(module);
+    tracePass("deadCode");
     // DCE first: a DataAddr it deletes is a reference deduplication no longer
     // needs to rewrite. Pruning later still sees every surviving reference on
     // its canonical label, so the two passes compose in either order.

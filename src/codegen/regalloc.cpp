@@ -1,4 +1,11 @@
-// regalloc.cpp — global liveness + local linear scan over the lowered IR.
+// regalloc.cpp — the legacy block-local allocator and the dispatch entry point.
+//
+// Whole-function allocation now lives in linear_scan.cpp. This file keeps the
+// previous global-liveness + block-local linear scan compiled behind
+// `kUseLegacyAllocator` so the Stage 1 gate can compare the two, and owns the
+// register-name table and the `allocateFunction` wrapper the emitter calls.
+//
+// The legacy scan's own contract, unchanged:
 //
 // The input is the lowered, non-phi IR codegen receives. The pass has two
 // cooperating halves:
@@ -42,6 +49,9 @@
 #include <utility>
 #include <vector>
 
+#include "codegen/linear_scan.h"
+#include "codegen/liveness.h"
+
 namespace cider {
 namespace codegen {
 
@@ -49,7 +59,7 @@ namespace {
 
 constexpr uint8_t kNoRegister = static_cast<uint8_t>(Register::None);
 constexpr uint32_t kInvalidValue = 0xFFFFFFFFu;
-constexpr uint8_t kRegisterCount = static_cast<uint8_t>(Register::Rbx) + 1;
+constexpr uint8_t kRegisterCount = static_cast<uint8_t>(Register::R15) + 1;
 constexpr uint64_t kOneDefinition = 1;
 // A live set wider than this is not turned into a pairwise interference
 // clique. Its values keep their frames instead: the clique's quadratic edge
@@ -346,8 +356,8 @@ bool spansBarrier(uint32_t start, uint32_t end,
     return false;
 }
 
-uint8_t registerBit(Register reg) {
-    return static_cast<uint8_t>(1u << static_cast<uint8_t>(reg));
+uint16_t registerBit(Register reg) {
+    return static_cast<uint16_t>(1u << static_cast<uint8_t>(reg));
 }
 
 bool isCalleeSaved(Register reg) {
@@ -664,7 +674,7 @@ GlobalPlan planGlobals(const ir::Function& fn,
             ++plan.spilled;
             continue;
         }
-        uint8_t taken = 0;
+        uint16_t taken = 0;
         auto neighbors = adj.find(id);
         if (neighbors != adj.end()) {
             for (uint32_t neighbor : neighbors->second) {
@@ -706,26 +716,622 @@ const char* registerName(Register reg) {
     switch (reg) {
         case Register::None:
             return "none";
+        case Register::Rax:
+            return "rax";
+        case Register::Rcx:
+            return "rcx";
+        case Register::Rdx:
+            return "rdx";
+        case Register::Rbx:
+            return "rbx";
+        case Register::Rsi:
+            return "rsi";
+        case Register::Rdi:
+            return "rdi";
         case Register::R8:
             return "r8";
         case Register::R9:
             return "r9";
         case Register::R10:
             return "r10";
-        case Register::Rdi:
-            return "rdi";
-        case Register::Rsi:
-            return "rsi";
-        case Register::Rbx:
-            return "rbx";
+        case Register::R11:
+            return "r11";
+        case Register::R12:
+            return "r12";
+        case Register::R13:
+            return "r13";
+        case Register::R14:
+            return "r14";
+        case Register::R15:
+            return "r15";
     }
     return "none";
 }
 
-FunctionAllocation allocateFunction(const ir::Function& fn) {
+const char* xmmRegisterName(XmmRegister reg) {
+    switch (reg) {
+        case XmmRegister::None:
+            return "none";
+        case XmmRegister::Xmm0:
+            return "xmm0";
+        case XmmRegister::Xmm1:
+            return "xmm1";
+        case XmmRegister::Xmm2:
+            return "xmm2";
+        case XmmRegister::Xmm3:
+            return "xmm3";
+        case XmmRegister::Xmm4:
+            return "xmm4";
+        case XmmRegister::Xmm5:
+            return "xmm5";
+        case XmmRegister::Xmm6:
+            return "xmm6";
+        case XmmRegister::Xmm7:
+            return "xmm7";
+        case XmmRegister::Xmm8:
+            return "xmm8";
+        case XmmRegister::Xmm9:
+            return "xmm9";
+        case XmmRegister::Xmm10:
+            return "xmm10";
+        case XmmRegister::Xmm11:
+            return "xmm11";
+        case XmmRegister::Xmm12:
+            return "xmm12";
+        case XmmRegister::Xmm13:
+            return "xmm13";
+        case XmmRegister::Xmm14:
+            return "xmm14";
+        case XmmRegister::Xmm15:
+            return "xmm15";
+    }
+    return "none";
+}
+
+namespace {
+
+constexpr uint8_t kNoXmm = static_cast<uint8_t>(XmmRegister::None);
+constexpr uint32_t kNoXmmSite = 0xFFFFFFFFu;
+constexpr uint32_t kSingleXmmBlock = 1;
+
+// Xmm0 is the emitter's float scratch register, so the allocator pool starts
+// at xmm1. SysV has no nonvolatile XMM register; the Microsoft x64 row keeps
+// xmm6-xmm15, which the emitter saves only when a home uses one.
+constexpr XmmRegister kSysVXmmPool[] = {
+    XmmRegister::Xmm1,  XmmRegister::Xmm2,  XmmRegister::Xmm3,
+    XmmRegister::Xmm4,  XmmRegister::Xmm5,  XmmRegister::Xmm6,
+    XmmRegister::Xmm7,  XmmRegister::Xmm8,  XmmRegister::Xmm9,
+    XmmRegister::Xmm10, XmmRegister::Xmm11, XmmRegister::Xmm12,
+    XmmRegister::Xmm13, XmmRegister::Xmm14, XmmRegister::Xmm15,
+};
+constexpr XmmRegister kMsXmmCallerPool[] = {
+    XmmRegister::Xmm1, XmmRegister::Xmm2, XmmRegister::Xmm3,
+    XmmRegister::Xmm4, XmmRegister::Xmm5,
+};
+constexpr XmmRegister kMsXmmCalleePool[] = {
+    XmmRegister::Xmm6,  XmmRegister::Xmm7,  XmmRegister::Xmm8,
+    XmmRegister::Xmm9,  XmmRegister::Xmm10, XmmRegister::Xmm11,
+    XmmRegister::Xmm12, XmmRegister::Xmm13, XmmRegister::Xmm14,
+    XmmRegister::Xmm15,
+};
+
+uint16_t xmmBit(XmmRegister reg) {
+    if (reg == XmmRegister::None) {
+        return 0;
+    }
+    return static_cast<uint16_t>(1u << (static_cast<uint8_t>(reg) - 1u));
+}
+
+uint16_t xmmMaskOf(const XmmRegister* begin, const XmmRegister* end) {
+    uint16_t mask = 0;
+    for (const XmmRegister* at = begin; at != end; ++at) {
+        mask |= xmmBit(*at);
+    }
+    return mask;
+}
+
+uint16_t xmmCallerMask(bool ms) {
+    return ms ? xmmMaskOf(std::begin(kMsXmmCallerPool),
+                          std::end(kMsXmmCallerPool))
+              : xmmMaskOf(std::begin(kSysVXmmPool),
+                          std::end(kSysVXmmPool));
+}
+
+uint16_t xmmCalleeMask() {
+    return xmmMaskOf(std::begin(kMsXmmCalleePool),
+                     std::end(kMsXmmCalleePool));
+}
+
+uint16_t xmmAllMask(bool ms) {
+    return static_cast<uint16_t>(xmmCallerMask(ms) | xmmCalleeMask());
+}
+
+// The float allocator refuses the same value shapes as the GPR scan: a phi or
+// a value the emitter keeps in memory for a fixed-width sequence never gets a
+// home. Float remainder is x87-only today, so its operands and result stay in
+// their cells. Parameters are prologue-written slots.
+void collectFloatExclusions(const ir::Function& fn,
+                            std::unordered_set<uint32_t>& excluded) {
+    for (const ir::Value& param : fn.params) {
+        exclude(excluded, param);
+    }
+    for (const ir::Block& block : fn.blocks) {
+        for (const ir::Instr& instr : block.body) {
+            if (instr.op == ir::Op::Phi) {
+                for (const ir::Value& result : instr.results) {
+                    exclude(excluded, result);
+                }
+                for (const ir::Value& operand : instr.operands) {
+                    exclude(excluded, operand);
+                }
+                for (const ir::PhiIncoming& incoming : instr.phiIncoming) {
+                    exclude(excluded, incoming.value);
+                }
+            }
+            if (instr.op == ir::Op::Extract || instr.op == ir::Op::Insert) {
+                for (const ir::Value& result : instr.results) {
+                    exclude(excluded, result);
+                }
+                for (const ir::Value& operand : instr.operands) {
+                    exclude(excluded, operand);
+                }
+                exclude(excluded, instr.addressBase);
+                exclude(excluded, instr.storedValue);
+            }
+            if (instr.op == ir::Op::Asm) {
+                for (const ir::Value& operand : instr.operands) {
+                    exclude(excluded, operand);
+                }
+                for (const ir::Value& result : instr.results) {
+                    exclude(excluded, result);
+                }
+            }
+            if ((instr.op == ir::Op::Load || instr.op == ir::Op::Store) &&
+                instr.isVolatile) {
+                if (instr.op == ir::Op::Load) {
+                    for (const ir::Value& result : instr.results) {
+                        exclude(excluded, result);
+                    }
+                }
+                if (instr.op == ir::Op::Store) {
+                    exclude(excluded, instr.storedValue);
+                }
+                exclude(excluded, instr.addressBase);
+            }
+            if (instr.op == ir::Op::Rem && isFloatWidth(instr.width)) {
+                for (const ir::Value& operand : instr.operands) {
+                    exclude(excluded, operand);
+                }
+                for (const ir::Value& result : instr.results) {
+                    exclude(excluded, result);
+                }
+            }
+        }
+    }
+}
+
+struct XmmCandidate {
+    uint32_t id = 0;
+    uint32_t start = 0;
+    uint32_t end = 0;
+    uint32_t uses = 0;
+    uint32_t depth = 0;
+    uint64_t cost = 0;
+    uint16_t forbidden = 0;
+    bool crosses = false;
+    bool isConst = false;
+};
+
+struct XmmActive {
+    uint32_t id = 0;
+    uint32_t end = 0;
+    uint64_t cost = 0;
+    uint8_t reg = kNoXmm;
+    bool crosses = false;
+};
+
+bool xmmCandidateLess(const XmmCandidate& lhs, const XmmCandidate& rhs) {
+    if (lhs.start != rhs.start) {
+        return lhs.start < rhs.start;
+    }
+    if (lhs.end != rhs.end) {
+        return lhs.end > rhs.end;
+    }
+    return lhs.id < rhs.id;
+}
+
+}  // namespace
+
+FloatAllocation allocateFloats(const ir::Function& fn, const Liveness& live) {
+    FloatAllocation result;
+    const size_t blockCount = fn.blocks.size();
+    if (blockCount == 0) {
+        return result;
+    }
+
+    uint32_t top = 0;
+    for (const LiveRange& range : live.ranges) {
+        if (range.value > top) {
+            top = range.value;
+        }
+    }
+    for (const ir::Value& param : fn.params) {
+        if (param.id != kInvalidValue && param.id > top) {
+            top = param.id;
+        }
+    }
+    for (const ir::Block& block : fn.blocks) {
+        for (const ir::Instr& instr : block.body) {
+            for (const ir::Value& value : instr.results) {
+                if (value.id != kInvalidValue && value.id > top) {
+                    top = value.id;
+                }
+            }
+        }
+    }
+    const uint32_t valueCount = top + 1;
+    result.home.resize(blockCount);
+    for (auto& block : result.home) {
+        block.assign(valueCount, kNoXmm);
+    }
+
+    const bool ms = fn.signature.abi() == Abi::MsAbi;
+    std::vector<const LiveRange*> rangeAt(valueCount, nullptr);
+    for (const LiveRange& range : live.ranges) {
+        rangeAt[range.value] = &range;
+    }
+
+    std::vector<uint32_t> defCount(valueCount, 0);
+    std::vector<uint32_t> defBlock(valueCount, kNoXmmSite);
+    std::vector<ir::IRType> widthAt(valueCount, ir::IRType::Void);
+    std::vector<uint8_t> isConstValue(valueCount, 0);
+    for (const ir::Value& param : fn.params) {
+        if (param.id == kInvalidValue) {
+            continue;
+        }
+        ++defCount[param.id];
+        defBlock[param.id] = 0;
+        widthAt[param.id] = param.width;
+    }
+    for (uint32_t b = 0; b < blockCount; ++b) {
+        for (const ir::Instr& instr : fn.blocks[b].body) {
+            for (const ir::Value& value : instr.results) {
+                if (value.id == kInvalidValue) {
+                    continue;
+                }
+                ++defCount[value.id];
+                defBlock[value.id] = b;
+                widthAt[value.id] = value.width;
+                isConstValue[value.id] =
+                    instr.op == ir::Op::Const ? 1 : 0;
+            }
+        }
+    }
+
+    std::unordered_set<uint32_t> excluded;
+    collectFloatExclusions(fn, excluded);
+
+    std::vector<std::vector<uint32_t>> presence(blockCount);
+    std::vector<std::vector<uint32_t>> valueBlocks(valueCount);
+    for (uint32_t b = 0; b < blockCount; ++b) {
+        auto addIds = [&](const std::vector<uint32_t>& ids) {
+            for (uint32_t id : ids) {
+                if (id <= top) {
+                    presence[b].push_back(id);
+                }
+            }
+        };
+        addIds(live.liveIn[b]);
+        addIds(live.liveOut[b]);
+    }
+    for (uint32_t id = 0; id <= top; ++id) {
+        if (defCount[id] == 1 && defBlock[id] != kNoXmmSite) {
+            presence[defBlock[id]].push_back(id);
+        }
+    }
+    for (uint32_t b = 0; b < blockCount; ++b) {
+        std::sort(presence[b].begin(), presence[b].end());
+        presence[b].erase(std::unique(presence[b].begin(), presence[b].end()),
+                          presence[b].end());
+        for (uint32_t id : presence[b]) {
+            valueBlocks[id].push_back(b);
+        }
+    }
+
+    std::vector<uint32_t> blockPosition(blockCount, 0);
+    for (uint32_t at = 0; at < live.blockOrder.size(); ++at) {
+        blockPosition[live.blockOrder[at]] = at;
+    }
+
+    std::vector<std::vector<uint32_t>> preds(blockCount);
+    std::vector<std::vector<uint32_t>> succ(blockCount);
+    std::unordered_map<uint32_t, uint32_t> blockAt;
+    for (uint32_t b = 0; b < blockCount; ++b) {
+        blockAt[fn.blocks[b].label] = b;
+    }
+    auto addTarget = [&](std::vector<uint32_t>& out, uint32_t label) {
+        auto found = blockAt.find(label);
+        if (found == blockAt.end()) {
+            return;
+        }
+        if (std::find(out.begin(), out.end(), found->second) == out.end()) {
+            out.push_back(found->second);
+        }
+    };
+    for (uint32_t b = 0; b < blockCount; ++b) {
+        const ir::Terminator& term = fn.blocks[b].term;
+        switch (term.term) {
+            case ir::Term::Br:
+                addTarget(succ[b], term.target);
+                break;
+            case ir::Term::CondBr:
+                addTarget(succ[b], term.thenTarget);
+                addTarget(succ[b], term.elseTarget);
+                break;
+            case ir::Term::Switch:
+                for (const ir::Case& arm : term.cases) {
+                    addTarget(succ[b], arm.target);
+                }
+                addTarget(succ[b], term.defaultTarget);
+                break;
+            case ir::Term::Ret:
+            case ir::Term::Unreachable:
+            case ir::Term::Trap:
+                break;
+        }
+    }
+    for (uint32_t b = 0; b < blockCount; ++b) {
+        for (uint32_t target : succ[b]) {
+            preds[target].push_back(b);
+        }
+    }
+
+    // The CFG predecessor walk and natural-loop depth still mirror
+    // linear_scan.cpp. Sharing that analysis is deferred: this fix only
+    // unifies liveness, and the two allocators' ordering remains identical.
+    std::vector<uint32_t> loopDepth(blockCount, 0);
+    for (uint32_t tail = 0; tail < blockCount; ++tail) {
+        for (uint32_t head : succ[tail]) {
+            if (blockPosition[head] > blockPosition[tail]) {
+                continue;
+            }
+            std::vector<uint8_t> inLoop(blockCount, 0);
+            std::vector<uint32_t> stack;
+            stack.push_back(tail);
+            inLoop[head] = 1;
+            while (!stack.empty()) {
+                const uint32_t node = stack.back();
+                stack.pop_back();
+                if (inLoop[node] != 0) {
+                    continue;
+                }
+                inLoop[node] = 1;
+                if (node == head) {
+                    continue;
+                }
+                for (uint32_t pred : preds[node]) {
+                    if (inLoop[pred] == 0) {
+                        stack.push_back(pred);
+                    }
+                }
+            }
+            for (uint32_t b = 0; b < blockCount; ++b) {
+                if (inLoop[b] != 0) {
+                    ++loopDepth[b];
+                }
+            }
+        }
+    }
+
+    const bool positionSafe = blockCount <= kPositionedBlockLimit;
+    std::vector<uint32_t> hardStops;
+    if (positionSafe) {
+        for (uint32_t b = 0; b < blockCount; ++b) {
+            const uint32_t base = blockPosition[b] * kBlockPositionScale;
+            const ir::Block& block = fn.blocks[b];
+            for (uint32_t i = 0; i < block.body.size(); ++i) {
+                if (block.body[i].op == ir::Op::Trap) {
+                    hardStops.push_back(base + i);
+                }
+            }
+        }
+        std::sort(hardStops.begin(), hardStops.end());
+    }
+
+    std::vector<XmmCandidate> candidates;
+    candidates.reserve(top + 1);
+    for (uint32_t id = 0; id <= top; ++id) {
+        const LiveRange* range = rangeAt[id];
+        if (range == nullptr || !range->isFloat || defCount[id] != 1 ||
+            defBlock[id] == kNoXmmSite ||
+            excluded.find(id) != excluded.end() ||
+            widthAt[id] == ir::IRType::Void || range->uses == 0) {
+            continue;
+        }
+        XmmCandidate candidate;
+        candidate.id = id;
+        candidate.start = range->start;
+        candidate.end = range->end;
+        candidate.uses = range->uses;
+        candidate.crosses = range->crossesCall;
+        candidate.isConst = isConstValue[id] != 0;
+        for (uint32_t b : valueBlocks[id]) {
+            const uint32_t base = blockPosition[b] * kBlockPositionScale;
+            const uint32_t blockEnd =
+                base + static_cast<uint32_t>(fn.blocks[b].body.size());
+            const bool liveIn = std::binary_search(
+                live.liveIn[b].begin(), live.liveIn[b].end(), id);
+            const bool liveOut = std::binary_search(
+                live.liveOut[b].begin(), live.liveOut[b].end(), id);
+            if (b != defBlock[id] || liveIn) {
+                candidate.start = std::min(candidate.start, base);
+            }
+            if (b != defBlock[id] || liveOut) {
+                candidate.end = std::max(candidate.end, blockEnd);
+            }
+            candidate.depth = std::max(candidate.depth, loopDepth[b]);
+        }
+        candidate.cost = candidate.isConst
+                             ? 0
+                             : static_cast<uint64_t>(candidate.uses) *
+                                   (static_cast<uint64_t>(candidate.depth) + 1);
+        if (!positionSafe) {
+            candidate.forbidden = xmmAllMask(ms);
+        } else {
+            auto stop = std::upper_bound(hardStops.begin(), hardStops.end(),
+                                         candidate.start);
+            if (stop != hardStops.end() && *stop <= candidate.end) {
+                candidate.forbidden = xmmAllMask(ms);
+            }
+        }
+        // A value crossing a barrier may only use a nonvolatile XMM register.
+        // SysV has none, so it keeps its slot there. The class mask below
+        // applies the same restriction even when this function has no
+        // callee-saved XMM row.
+        if (candidate.crosses && !ms) {
+            candidate.forbidden = xmmAllMask(ms);
+        }
+        candidates.push_back(candidate);
+    }
+
+    std::sort(candidates.begin(), candidates.end(), xmmCandidateLess);
+
+    std::vector<uint8_t> regOf(valueCount, kNoXmm);
+    std::vector<XmmActive> active;
+    const uint16_t all = xmmAllMask(ms);
+    // SysV has no nonvolatile XMM register. The Microsoft row is the only
+    // class that may carry a value across a barrier.
+    const uint16_t callee = ms ? xmmCalleeMask() : 0;
+    const XmmRegister* callerBegin =
+        ms ? std::begin(kMsXmmCallerPool) : std::begin(kSysVXmmPool);
+    const XmmRegister* callerEnd =
+        ms ? std::end(kMsXmmCallerPool) : std::end(kSysVXmmPool);
+
+    for (const XmmCandidate& candidate : candidates) {
+        active.erase(std::remove_if(active.begin(), active.end(),
+                                    [&](const XmmActive& held) {
+                                        return held.end <= candidate.start;
+                                    }),
+                     active.end());
+
+        uint16_t taken = 0;
+        for (const XmmActive& held : active) {
+            taken |= xmmBit(static_cast<XmmRegister>(held.reg));
+        }
+        const uint16_t classMask = candidate.crosses ? callee : all;
+        uint16_t allowed = static_cast<uint16_t>(
+            classMask & ~candidate.forbidden & ~taken);
+
+        uint8_t chosen = kNoXmm;
+        if (candidate.crosses) {
+            for (const XmmRegister* at = std::begin(kMsXmmCalleePool);
+                 at != std::end(kMsXmmCalleePool); ++at) {
+                if ((allowed & xmmBit(*at)) != 0) {
+                    chosen = static_cast<uint8_t>(*at);
+                    break;
+                }
+            }
+        } else {
+            for (const XmmRegister* at = callerBegin; at != callerEnd; ++at) {
+                if ((allowed & xmmBit(*at)) != 0) {
+                    chosen = static_cast<uint8_t>(*at);
+                    break;
+                }
+            }
+            if (ms && chosen == kNoXmm) {
+                for (const XmmRegister* at = std::begin(kMsXmmCalleePool);
+                     at != std::end(kMsXmmCalleePool); ++at) {
+                    if ((allowed & xmmBit(*at)) != 0) {
+                        chosen = static_cast<uint8_t>(*at);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (chosen == kNoXmm) {
+            const uint16_t usable =
+                static_cast<uint16_t>(classMask & ~candidate.forbidden);
+            XmmActive* victim = nullptr;
+            for (XmmActive& held : active) {
+                if (held.crosses) {
+                    continue;
+                }
+                if ((usable & xmmBit(static_cast<XmmRegister>(held.reg))) == 0) {
+                    continue;
+                }
+                if (victim == nullptr || held.cost < victim->cost ||
+                    (held.cost == victim->cost && held.end > victim->end) ||
+                    (held.cost == victim->cost && held.end == victim->end &&
+                     held.id < victim->id)) {
+                    victim = &held;
+                }
+            }
+            if (victim != nullptr && victim->cost < candidate.cost) {
+                const uint8_t freed = victim->reg;
+                const uint32_t victimId = victim->id;
+                regOf[victimId] = kNoXmm;
+                active.erase(std::remove_if(active.begin(), active.end(),
+                                            [&](const XmmActive& held) {
+                                                return held.id == victimId;
+                                            }),
+                             active.end());
+                chosen = freed;
+            }
+        }
+
+        if (chosen == kNoXmm) {
+            continue;
+        }
+        regOf[candidate.id] = chosen;
+        active.push_back(XmmActive{candidate.id, candidate.end, candidate.cost,
+                                   chosen, candidate.crosses});
+    }
+
+    uint16_t used = 0;
+    for (uint32_t id = 0; id <= top; ++id) {
+        if (regOf[id] != kNoXmm) {
+            used |= xmmBit(static_cast<XmmRegister>(regOf[id]));
+        }
+    }
+    if (ms) {
+        for (const XmmRegister candidate : kMsXmmCalleePool) {
+            if ((used & xmmBit(candidate)) != 0) {
+                result.calleeSaved.push_back(candidate);
+            }
+        }
+    }
+
+    for (uint32_t b = 0; b < blockCount; ++b) {
+        for (uint32_t id : presence[b]) {
+            if (regOf[id] != kNoXmm) {
+                result.home[b][id] = regOf[id];
+            }
+        }
+    }
+    return result;
+}
+
+// The Stage 1 gate compares the two allocators, so the old block-local scan
+// stays compiled behind this compile-time switch. It is not a runtime option:
+// `allocateFunction` is the only entry point, and the switch is false.
+constexpr bool kUseLegacyAllocator = false;
+
+// The previous block-local linear scan, kept for the gate comparison. Its
+// register pools and refusal rules are unchanged; the new enum value order and
+// the widened register bits are the only mechanical updates it needed.
+static FunctionAllocation allocateLegacy(const ir::Function& fn) {
     FunctionAllocation result;
     result.blocks.resize(fn.blocks.size());
     const uint32_t top = maxValueId(fn);
+    const uint32_t valueCount = top + 1;
+    result.spillSlot.resize(valueCount);
+    for (uint32_t id = 0; id < valueCount; ++id) {
+        // The legacy frame is still one cell per value id. Keep the mapping
+        // identical to the linear scan's, so the two paths differ only in
+        // homes and counters.
+        result.spillSlot[id] = id;
+    }
     for (BlockAllocation& block : result.blocks) {
         block.home.assign(static_cast<uint64_t>(top) + 1, kNoRegister);
     }
@@ -818,10 +1424,10 @@ FunctionAllocation allocateFunction(const ir::Function& fn) {
 
     // A global home owns its register for the whole block it is live in, so
     // the local scan cannot reuse it anywhere inside that block.
-    std::vector<uint8_t> reserved(fn.blocks.size());
+    std::vector<uint16_t> reserved(fn.blocks.size());
     for (const auto& entry : global.home) {
         const uint32_t id = entry.first;
-        const uint8_t bit = registerBit(static_cast<Register>(entry.second));
+        const uint16_t bit = registerBit(static_cast<Register>(entry.second));
         auto def = defs.find(id);
         if (def != defs.end()) {
             for (const Site& site : def->second) {
@@ -991,6 +1597,25 @@ FunctionAllocation allocateFunction(const ir::Function& fn) {
             active.push_back(Active{interval.end, chosen});
             ++result.valuesAllocated;
         }
+    }
+    return result;
+}
+
+FunctionAllocation allocateFunction(const ir::Function& fn,
+                                    bool includeFloats, bool fast) {
+    // One liveness analysis feeds the GPR scan, the float scan and the fast
+    // emitter's live-out guard. The legacy emitter asks for no float class,
+    // so it pays for no float scan; its slots and text are unchanged.
+    const Liveness live = analyzeLiveness(fn);
+    FunctionAllocation result;
+    if (kUseLegacyAllocator) {
+        result = allocateLegacy(fn);
+        result.live = live;
+    } else {
+        result = allocateLinearScan(fn, live, fast);
+    }
+    if (includeFloats) {
+        result.floats = allocateFloats(fn, result.live);
     }
     return result;
 }

@@ -7,13 +7,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <new>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "driver/driver.h"
+#include "ir/ir.h"
 
 #include "entry_fixture.h"
 
@@ -121,6 +124,112 @@ void testCompileIr() {
     unlink(src2.c_str());
     unlink(src.c_str());
     unlink(asmPath);
+}
+
+// A test-support flag: per-pass IR and counters, only on `ir`.
+void testDumpPasses() {
+    std::printf("per-pass dump\n");
+    std::string src = writeTemp("func main() -> int { return 40 + 2; }\n");
+    Result plain = run({"ir", src});
+    Result traced = run({"ir", "--dump-passes", src});
+    Result wrong = run({"compile", "--dump-passes", src});
+    check(traced.code == 0, "ir --dump-passes succeeds: " + traced.err);
+    check(traced.out.find("== inlineCalls ==\n") != std::string::npos,
+          "the trace names the inline pass");
+    check(traced.out.find("== deadCode ==\n") != std::string::npos,
+          "the trace names the DCE pass");
+    check(traced.out.find("folded=") != std::string::npos,
+          "the trace prints counters");
+    check(traced.out.find("module main\n") != std::string::npos,
+          "the ordinary dump still follows the trace");
+    check(plain.out.find("== ") == std::string::npos,
+          "default ir output is unchanged");
+    check(wrong.code == 2 &&
+              wrong.err.find("'--dump-passes' is only valid for ir") !=
+                  std::string::npos,
+          "the flag is refused outside ir");
+    unlink(src.c_str());
+
+    // The lossless dump must carry call-argument words after a `|` token, so
+    // the cost model can see values used only as call arguments.
+    std::string callSrc = writeTemp(
+        "func g(x: i64) -> i64 { return x; }\n"
+        "func main() -> int { var a: i64 = g(7); return a as int; }\n");
+    Result callTraced = run({"ir", "--dump-passes", callSrc});
+    check(callTraced.code == 0,
+          "ir --dump-passes with a call succeeds: " + callTraced.err);
+    bool foundCallArgs = false;
+    std::istringstream lines(callTraced.out);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.find("call") != std::string::npos &&
+            line.find(" | %") != std::string::npos) {
+            foundCallArgs = true;
+            break;
+        }
+    }
+    check(foundCallArgs, "a call dumps its argument words after ' | '");
+    unlink(callSrc.c_str());
+
+    // The lossless dump must also expose Load/Store address (and stored)
+    // words and each block's terminator, so the cost model can see stack
+    // cells and stack references. These suffixes are additive: the `|`
+    // call-argument form above is untouched. Build the module by hand so
+    // the address/stored/ret ids are known exactly.
+    auto value = [](uint32_t id) {
+        cider::ir::Value v;
+        v.id = id;
+        v.width = cider::ir::IRType::I64;
+        return v;
+    };
+    cider::ir::Module module;
+    module.name = "addrterms";
+    cider::ir::Function fn;
+    fn.name = "f";
+    cider::ir::Block block;
+    block.label = 0;
+
+    cider::ir::Instr load;
+    load.op = cider::ir::Op::Load;
+    load.width = cider::ir::IRType::I64;
+    load.results.push_back(value(3));
+    load.addressBase = value(1);
+    block.body.push_back(load);
+
+    cider::ir::Instr store;
+    store.op = cider::ir::Op::Store;
+    store.width = cider::ir::IRType::I64;
+    store.addressBase = value(1);
+    store.storedValue = value(2);
+    block.body.push_back(store);
+
+    block.term.term = cider::ir::Term::Ret;
+    block.term.values.push_back(value(3));
+    fn.blocks.push_back(std::move(block));
+    module.functions.push_back(std::move(fn));
+
+    std::string dump = cider::ir::dumpModule(module);
+    bool foundLoadAddr = false;
+    bool foundStore = false;
+    bool foundTerm = false;
+    std::istringstream addrLines(dump);
+    while (std::getline(addrLines, line)) {
+        if (line.find("load") != std::string::npos &&
+            line.find(" #addr %1") != std::string::npos) {
+            foundLoadAddr = true;
+        }
+        if (line.find("store") != std::string::npos &&
+            line.find(" #addr %1") != std::string::npos &&
+            line.find(" #stored %2") != std::string::npos) {
+            foundStore = true;
+        }
+        if (line.find("term ret %3") != std::string::npos) {
+            foundTerm = true;
+        }
+    }
+    check(foundLoadAddr, "a load dumps its address base after ' #addr '");
+    check(foundStore, "a store dumps its address base and stored value");
+    check(foundTerm, "a Ret block dumps its result after 'term ret '");
 }
 
 // `run` answers the program's exit code. The link is sovereign: nasm and
@@ -698,6 +807,67 @@ void testChecksFlag() {
     unlink(asmPath);
 }
 
+// --codegen selects an emitter, not a target. Both values are accepted by the
+// commands that emit, an unknown value names itself, and a non-emitting
+// command refuses the flag rather than ignoring it.
+void testCodegenFlag() {
+    std::printf("--codegen\n");
+    std::string src = writeTemp("func main() -> int { return 7; }\n");
+
+    for (const char* kind : {"legacy", "fast"}) {
+        char asmPath[] = "/tmp/cider_driver_codegen_XXXXXX.s";
+        int asmFd = mkstemps(asmPath, 2);
+        close(asmFd);
+        Result compiled = run({"compile", std::string("--codegen=") + kind,
+                               "-o", asmPath, src});
+        check(compiled.code == 0,
+              std::string("compile --codegen=") + kind + ": " + compiled.err);
+        FILE* asmFile = fopen(asmPath, "r");
+        char head[64] = {0};
+        size_t got = asmFile != nullptr ? fread(head, 1, 63, asmFile) : 0;
+        if (asmFile != nullptr) {
+            fclose(asmFile);
+        }
+        check(got > 0 && std::string(head).find("_start:") != std::string::npos,
+              std::string("--codegen=") + kind + " emits the entry");
+        unlink(asmPath);
+    }
+
+    Result ran = run({"run", "--codegen=fast", src});
+    check(ran.code == 7,
+          "run --codegen=fast answers the exit code: " + ran.err);
+
+    char cacheDir[] = "/tmp/cider_driver_codegen_cache_XXXXXX";
+    check(mkdtemp(cacheDir) != nullptr, "a scratch cache directory exists");
+    char binPath[] = "/tmp/cider_driver_codegen_bin_XXXXXX";
+    int binFd = mkstemps(binPath, 0);
+    close(binFd);
+    Result built = run({"build", "--codegen=fast", "--cache-dir", cacheDir,
+                        "-o", binPath, src});
+    check(built.code == 0, "build --codegen=fast: " + built.err);
+    std::error_code ignored;
+    std::filesystem::remove_all(cacheDir, ignored);
+    unlink(binPath);
+
+    Result bogus = run({"compile", "--codegen=wat", src});
+    check(bogus.code != 0, "an unknown codegen fails");
+    check(bogus.err.find("unknown codegen") != std::string::npos,
+          "the diagnostic says unknown codegen");
+    check(bogus.err.find("wat") != std::string::npos,
+          "the unknown codegen is named");
+
+    Result spaced = run({"run", "--codegen", "fast", src});
+    check(spaced.code == 7, "the spaced --codegen form is accepted: " +
+                                spaced.err);
+
+    Result checked = run({"check", "--codegen=legacy", src});
+    check(checked.code != 0, "check refuses --codegen");
+    check(checked.err.find("--codegen") != std::string::npos,
+          "naming the rejected flag");
+
+    unlink(src.c_str());
+}
+
 // OOM injection crosses the stage boundary as the two C++ allocation
 // shapes; the top-level catch in main maps both to the same compiler line.
 // A failed write names the destination and exits 2 instead of reporting a
@@ -770,6 +940,7 @@ int main() {
     std::printf("driver_test — the command behaves\n\n");
     testCheck();
     testCompileIr();
+    testDumpPasses();
     testRun();
     testImports();
     testImportAlias();
@@ -784,6 +955,7 @@ int main() {
     testNativeTargetAliases();
     testKnownTargetsReachFrontEnd();
     testChecksFlag();
+    testCodegenFlag();
     testOomAndWriteFailure();
     testFailures();
     testVmTarget();

@@ -1,9 +1,10 @@
-// regalloc_test.cpp — the local linear scan's contract, without an emitter.
+// regalloc_test.cpp — the whole-function linear scan's contract, without an
+// emitter.
 //
 // These tests build the lowered IR shape codegen receives and inspect the
-// homes the allocator answers. They pin the safe scope: one block, one
-// definition, no floats, no fixed-scratch instructions, no values that cross
-// a call/asm/trap/volatile barrier, and per-ABI caller-saved register pools.
+// homes the allocator answers. They pin the safe scope: one definition, no
+// floats, no fixed-scratch instructions, barrier crossings, per-ABI register
+// pools, and the spill-slot map.
 
 #include <cstdint>
 #include <cstdio>
@@ -106,6 +107,21 @@ cider::codegen::Register homeOf(const cider::codegen::FunctionAllocation& alloc,
     return static_cast<cider::codegen::Register>(home[id]);
 }
 
+bool sameAllocation(const cider::codegen::FunctionAllocation& lhs,
+                    const cider::codegen::FunctionAllocation& rhs) {
+    if (lhs.blocks.size() != rhs.blocks.size() ||
+        lhs.calleeSaved != rhs.calleeSaved ||
+        lhs.spillSlot != rhs.spillSlot) {
+        return false;
+    }
+    for (size_t block = 0; block < lhs.blocks.size(); ++block) {
+        if (lhs.blocks[block].home != rhs.blocks[block].home) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool hasCalleeSaved(const cider::codegen::FunctionAllocation& alloc,
                     cider::codegen::Register reg) {
     for (cider::codegen::Register used : alloc.calleeSaved) {
@@ -149,11 +165,12 @@ void testReuse() {
     f.fn.blocks[0].term.values.push_back(value(3));
 
     const auto alloc = cider::codegen::allocateFunction(f.fn);
-    check(isReg(alloc, 0, 0, cider::codegen::Register::R8),
-          "the first interval takes r8");
-    check(isReg(alloc, 0, 1, cider::codegen::Register::R9),
-          "a value overlapping the previous definition gets the next register");
-    check(isReg(alloc, 0, 2, cider::codegen::Register::R8),
+    check(isReg(alloc, 0, 0, cider::codegen::Register::Rcx),
+          "the first interval takes rcx, the first caller register the next "
+          "instruction does not clobber");
+    check(isReg(alloc, 0, 1, cider::codegen::Register::Rcx),
+          "a value used at the next definition's boundary reuses its register");
+    check(isReg(alloc, 0, 2, cider::codegen::Register::Rcx),
           "a register is reused after its interval ends");
     check(alloc.valuesAllocated == 4 && alloc.valuesSpilled == 0,
           "four short intervals, no spills");
@@ -161,31 +178,47 @@ void testReuse() {
 
 void testPressure() {
     std::printf("spill-on-pressure\n");
+    // More simultaneous SysV intervals than the whole-function register file
+    // holds. Fourteen GPRs are allocatable (rsp/rbp reserved), but the Add's
+    // implicit rax scratch means a value cannot cross it in rax, leaving
+    // thirteen. One interval must keep its slot.
+    constexpr uint32_t kPressured = 15;
     Fn f;
-    for (uint32_t id = 0; id < 6; ++id) {
+    for (uint32_t id = 0; id < kPressured; ++id) {
         f.add(0, define(cider::ir::Op::Const, id));
     }
     cider::ir::Instr joined;
     joined.op = cider::ir::Op::Add;
     joined.width = cider::ir::IRType::I64;
-    for (uint32_t id = 0; id < 6; ++id) {
+    for (uint32_t id = 0; id < kPressured; ++id) {
         joined.operands.push_back(value(id));
     }
-    joined.results.push_back(value(6));
+    joined.results.push_back(value(kPressured));
     f.add(0, std::move(joined));
 
     const auto alloc = cider::codegen::allocateFunction(f.fn);
-    check(alloc.valuesSpilled == 1,
-          "a sixth simultaneous SysV interval spills");
-    check(alloc.valuesAllocated == 5,
-          "the five caller-saved SysV registers carry the rest");
+    check(alloc.valuesSpilled == 2,
+          "a fifteenth simultaneous interval spills twice over");
+    check(alloc.valuesAllocated == 13,
+          "every non-clobbered register carries a value");
     std::vector<cider::codegen::Register> pool = {
-        cider::codegen::Register::R8, cider::codegen::Register::R9,
-        cider::codegen::Register::R10, cider::codegen::Register::Rdi,
-        cider::codegen::Register::Rsi};
-    check(allHomesInPool(alloc, 0, 5, pool),
-          "every spill leaves a value in the SysV pool");
-    check(isReg(alloc, 0, 5, cider::codegen::Register::None),
+        cider::codegen::Register::Rax,
+        cider::codegen::Register::Rcx,
+        cider::codegen::Register::Rdx,
+        cider::codegen::Register::Rsi,
+        cider::codegen::Register::Rdi,
+        cider::codegen::Register::R8,
+        cider::codegen::Register::R9,
+        cider::codegen::Register::R10,
+        cider::codegen::Register::R11,
+        cider::codegen::Register::Rbx,
+        cider::codegen::Register::R12,
+        cider::codegen::Register::R13,
+        cider::codegen::Register::R14,
+        cider::codegen::Register::R15};
+    check(allHomesInPool(alloc, 0, kPressured - 1, pool),
+          "every home comes from the allocatable register file");
+    check(isReg(alloc, 0, kPressured - 1, cider::codegen::Register::None),
           "the last interval is the one that keeps its stack slot");
 }
 
@@ -205,12 +238,22 @@ void testMsAbiPool() {
 
     const auto alloc = cider::codegen::allocateFunction(f.fn);
     std::vector<cider::codegen::Register> pool = {
-        cider::codegen::Register::R8, cider::codegen::Register::R9,
-        cider::codegen::Register::R10};
+        cider::codegen::Register::Rax,
+        cider::codegen::Register::Rcx,
+        cider::codegen::Register::Rdx,
+        cider::codegen::Register::R8,
+        cider::codegen::Register::R9,
+        cider::codegen::Register::R10,
+        cider::codegen::Register::R11,
+        cider::codegen::Register::Rbx,
+        cider::codegen::Register::R12,
+        cider::codegen::Register::R13,
+        cider::codegen::Register::R14,
+        cider::codegen::Register::R15};
     check(allHomesInPool(alloc, 0, 3, pool),
-          "msabi never homes a value in nonvolatile rdi/rsi");
-    check(alloc.valuesAllocated == 3 && alloc.valuesSpilled == 1,
-          "the msabi row holds three, then spills");
+          "msabi homes never use the nonvolatile rdi/rsi");
+    check(alloc.valuesAllocated == 4 && alloc.valuesSpilled == 0,
+          "the msabi row holds all four short intervals");
 }
 
 void testBarriers() {
@@ -227,7 +270,9 @@ void testBarriers() {
         f.fn.blocks[0].term.term = cider::ir::Term::Ret;
         f.fn.blocks[0].term.values.push_back(value(2));
         const auto alloc = cider::codegen::allocateFunction(f.fn);
-        check(!hasHome(alloc, 0, 0), "a value live across a call keeps its slot");
+        check(hasHome(alloc, 0, 0) &&
+                  hasCalleeSaved(alloc, cider::codegen::Register::Rbx),
+              "a value live across a call takes the callee-saved rbx");
         check(hasHome(alloc, 0, 1), "a value born after the call may use a register");
         check(hasHome(alloc, 0, 2), "the post-call range continues in a register");
     }
@@ -240,7 +285,9 @@ void testBarriers() {
         f.add(0, std::move(asmInstr));
         f.add(0, binary(cider::ir::Op::Add, 1, {value(0), value(0)}));
         const auto alloc = cider::codegen::allocateFunction(f.fn);
-        check(!hasHome(alloc, 0, 0), "asm is a barrier");
+        check(hasHome(alloc, 0, 0) &&
+                  hasCalleeSaved(alloc, cider::codegen::Register::Rbx),
+              "asm is a barrier, so the crosser takes rbx");
     }
     {
         Fn f;
@@ -333,8 +380,8 @@ void testCrossBlock() {
           "a value used in another block is homed on both sides");
     check(homeOf(alloc, 0, 0) == homeOf(alloc, 1, 0),
           "one register carries the cross-block value");
-    check(homeOf(alloc, 0, 0) == cider::codegen::Register::R8,
-          "the only global interval takes r8");
+    check(homeOf(alloc, 0, 0) == cider::codegen::Register::Rcx,
+          "the only global interval takes rcx");
     check(hasHome(alloc, 0, 1), "a value contained in one block is homed");
     check(hasHome(alloc, 0, 2), "the block-local result is homed too");
     check(alloc.globalValues == 1 && alloc.globalSpilled == 0,
@@ -367,8 +414,8 @@ void testGlobalBranchMerge() {
           "a merge keeps the value in one home through both arms");
     check(homeOf(alloc, 0, 0) == homeOf(alloc, 3, 0),
           "the branch merge reads the same register the entry wrote");
-    check(homeOf(alloc, 0, 0) == cider::codegen::Register::R8,
-          "an unbarriered global interval uses r8");
+    check(homeOf(alloc, 0, 0) == cider::codegen::Register::Rcx,
+          "an unbarriered global interval takes rcx");
     check(alloc.calleeSaved.empty(),
           "a merge with no barrier needs no callee-saved register");
     check(homeOf(alloc, 3, 1) != homeOf(alloc, 3, 0),
@@ -407,7 +454,7 @@ void testGlobalLoopCarried() {
     check(homeOf(alloc, 0, 0) == homeOf(alloc, 2, 0) &&
               homeOf(alloc, 0, 0) == homeOf(alloc, 3, 0),
           "the loop and its exit read the same register");
-    check(homeOf(alloc, 0, 0) == cider::codegen::Register::R8,
+    check(homeOf(alloc, 0, 0) == cider::codegen::Register::Rcx,
           "a loop with no barrier keeps the caller-saved home");
 }
 
@@ -436,12 +483,14 @@ void testGlobalAcrossCall() {
     check(homeOf(alloc, 0, 0) == cider::codegen::Register::Rbx &&
               homeOf(alloc, 2, 0) == cider::codegen::Register::Rbx,
           "the first cross-call value takes the callee-saved rbx");
-    check(!hasHome(alloc, 0, 1) && !hasHome(alloc, 2, 1),
-          "the second cross-call value spills instead of sharing rbx");
-    check(hasCalleeSaved(alloc, cider::codegen::Register::Rbx),
-          "the allocation asks the emitter to save rbx");
-    check(alloc.globalValues == 1 && alloc.globalSpilled == 1,
-          "one callee-saved home and one global spill");
+    check(homeOf(alloc, 0, 1) == cider::codegen::Register::R12 &&
+              homeOf(alloc, 2, 1) == cider::codegen::Register::R12,
+          "the second cross-call value takes the next callee-saved r12");
+    check(hasCalleeSaved(alloc, cider::codegen::Register::Rbx) &&
+              hasCalleeSaved(alloc, cider::codegen::Register::R12),
+          "the allocation asks the emitter to save both callee-saved homes");
+    check(alloc.globalValues == 2 && alloc.globalSpilled == 0,
+          "both cross-call values are homed without a spill");
 }
 
 void testGlobalTerminatorUseAcrossCall() {
@@ -497,9 +546,9 @@ void testGlobalAsmAndVolatileBarriers() {
 
         const auto alloc = cider::codegen::allocateFunction(f.fn);
         check(homeOf(alloc, 0, 0) == cider::codegen::Register::Rbx,
-              "asm leaves at most the callee-saved rbx for a crosser");
-        check(!hasHome(alloc, 0, 1),
-              "asm pressure spills the second crosser");
+              "asm leaves the callee-saved row for a crosser");
+        check(homeOf(alloc, 0, 1) == cider::codegen::Register::R12,
+              "asm pressure uses the next callee-saved register");
     }
     {
         Fn f;
@@ -598,21 +647,22 @@ void testGlobalRegisterReuse() {
     f.fn.blocks[3].term.values.push_back(value(3));
 
     const auto alloc = cider::codegen::allocateFunction(f.fn);
-    check(homeOf(alloc, 0, 0) == cider::codegen::Register::R8 &&
-              homeOf(alloc, 1, 0) == cider::codegen::Register::R8,
-          "the first global interval takes r8");
-    check(homeOf(alloc, 2, 2) == cider::codegen::Register::R8 &&
-              homeOf(alloc, 3, 2) == cider::codegen::Register::R8,
-          "a later, non-overlapping global interval reuses r8");
+    check(homeOf(alloc, 0, 0) == cider::codegen::Register::Rcx &&
+              homeOf(alloc, 1, 0) == cider::codegen::Register::Rcx,
+          "the first global interval takes rcx");
+    check(homeOf(alloc, 2, 2) == cider::codegen::Register::Rcx &&
+              homeOf(alloc, 3, 2) == cider::codegen::Register::Rcx,
+          "a later, non-overlapping global interval reuses rcx");
     check(alloc.globalValues == 2 && alloc.globalSpilled == 0,
           "both global intervals are homed without pressure");
 }
 
 void testWideLiveSetFallsBack() {
     std::printf("wide live set\n");
-    // An array copy can keep thousands of values live at one point. The
-    // allocator must not build that clique; it keeps every cross-block value
-    // in its slot instead, and still homes a local value normally.
+    // An array copy can keep thousands of values live at one point. The scan
+    // is linear in the live set, so it must stay bounded and deterministic
+    // rather than building a quadratic clique. Values over the register file
+    // spill; the wide block's own result still gets a home.
     constexpr uint32_t kWide = 80;
     Fn f;
     cider::ir::Block second;
@@ -634,17 +684,33 @@ void testWideLiveSetFallsBack() {
     f.fn.blocks[1].term.values.push_back(value(kWide));
 
     const auto alloc = cider::codegen::allocateFunction(f.fn);
-    bool allSpilled = true;
+    check(alloc.globalValues > 0 && alloc.globalValues <= 14,
+          "a wide live set homes only what the register file holds");
+    check(alloc.globalValues + alloc.globalSpilled == kWide,
+          "every wide live-set value is either homed or counted as a spill");
+    bool consistent = true;
+    std::vector<uint8_t> seen(16, 0);
     for (uint32_t id = 0; id < kWide; ++id) {
-        if (hasHome(alloc, 0, id) || hasHome(alloc, 1, id)) {
-            allSpilled = false;
+        const auto def = homeOf(alloc, 0, id);
+        const auto use = homeOf(alloc, 1, id);
+        if (def != use) {
+            consistent = false;
+        }
+        if (def != cider::codegen::Register::None) {
+            const uint8_t reg = static_cast<uint8_t>(def);
+            if (reg >= seen.size() || seen[reg] != 0) {
+                consistent = false;
+            } else {
+                seen[reg] = 1;
+            }
         }
     }
-    check(allSpilled, "a live set over the clique limit keeps every slot");
-    check(alloc.globalSpilled == kWide,
-          "every wide live-set value is counted as a global spill");
+    check(consistent,
+          "wide-set homes agree across blocks and never overlap");
     check(hasHome(alloc, 1, kWide),
           "a value local to the wide block still gets a register");
+    check(sameAllocation(alloc, cider::codegen::allocateFunction(f.fn)),
+          "two wide-set allocations are identical");
 }
 
 void testUnsuitableValues() {
@@ -700,14 +766,49 @@ void testPhiRefused() {
     check(!hasHome(alloc, 0, 1), "a phi incoming value is excluded conservatively");
 }
 
+void testSpillSlots() {
+    std::printf("spill slot map\n");
+    Fn f;
+    f.add(0, define(cider::ir::Op::Const, 0));
+    f.add(0, binary(cider::ir::Op::Add, 1, {value(0), value(0)}));
+    // A higher, unused id pins the map's extent: every value the function
+    // mentions has a slot index, not just the homed ones.
+    f.add(0, define(cider::ir::Op::Const, 5));
+    f.fn.blocks[0].term.term = cider::ir::Term::Ret;
+    f.fn.blocks[0].term.values.push_back(value(1));
+
+    const auto alloc = cider::codegen::allocateFunction(f.fn);
+    check(alloc.spillSlot.size() == 6,
+          "spillSlot covers every value id the function mentions");
+    check(alloc.spillSlot[0] == 0 && alloc.spillSlot[1] == 1 &&
+              alloc.spillSlot[5] == 5,
+          "each value id maps to its current frame slot");
+}
+
 void testNames() {
     std::printf("names\n");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::Rax)) == "rax",
+          "rax names itself");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::Rcx)) == "rcx",
+          "rcx names itself");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::Rdx)) == "rdx",
+          "rdx names itself");
     check(std::string(cider::codegen::registerName(cider::codegen::Register::R8)) == "r8",
           "r8 names itself");
     check(std::string(cider::codegen::registerName(cider::codegen::Register::Rsi)) == "rsi",
           "rsi names itself");
     check(std::string(cider::codegen::registerName(cider::codegen::Register::Rbx)) == "rbx",
           "rbx names itself");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::R11)) == "r11",
+          "r11 names itself");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::R12)) == "r12",
+          "r12 names itself");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::R13)) == "r13",
+          "r13 names itself");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::R14)) == "r14",
+          "r14 names itself");
+    check(std::string(cider::codegen::registerName(cider::codegen::Register::R15)) == "r15",
+          "r15 names itself");
 }
 
 }  // namespace
@@ -731,6 +832,7 @@ int main() {
     testUnsuitableValues();
     testMultipleDefinitions();
     testPhiRefused();
+    testSpillSlots();
     testNames();
     if (failures != 0) {
         std::printf("%d check(s) failed\n", failures);

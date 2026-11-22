@@ -194,6 +194,32 @@ struct Ir {
         return instr;
     }
 
+    cider::ir::Instr cmp(uint32_t id, cider::ir::CmpOp pred,
+                         cider::ir::Value lhs, cider::ir::Value rhs) {
+        cider::ir::Instr instr;
+        instr.op = cider::ir::Op::Cmp;
+        instr.width = cider::ir::IRType::Bool;
+        instr.type = boolean();
+        instr.cmp = pred;
+        instr.isPure = true;
+        instr.results.push_back(value(id, instr.width, instr.type));
+        instr.operands.push_back(lhs);
+        instr.operands.push_back(rhs);
+        return instr;
+    }
+
+    cider::ir::Instr cast(uint32_t id, cider::ir::Value source,
+                          cider::ir::IRType width, cider::TypeRef type) {
+        cider::ir::Instr instr;
+        instr.op = cider::ir::Op::Cast;
+        instr.width = width;
+        instr.type = type;
+        instr.isPure = true;
+        instr.results.push_back(value(id, width, type));
+        instr.operands.push_back(source);
+        return instr;
+    }
+
     cider::ir::Instr phi(
         uint32_t id, cider::ir::IRType width, cider::TypeRef type,
         const std::vector<std::pair<uint32_t, uint32_t>>& incoming) {
@@ -860,6 +886,83 @@ void testDeterminism() {
           "a second run is a no-op");
 }
 
+void testCmpOfConstantsFoldsBranch() {
+    std::printf("a Cmp of two constants folds its branch\n");
+    Ir ir;
+    cider::TypeRef t = ir.i32();
+    ir.emit(ir.constant(1, 3, cider::ir::IRType::I32, t));
+    ir.emit(ir.constant(2, 5, cider::ir::IRType::I32, t));
+    ir.emit(ir.cmp(3, cider::ir::CmpOp::Lt,
+                   ir.value(1, cider::ir::IRType::I32, t),
+                   ir.value(2, cider::ir::IRType::I32, t)));
+    ir.blockAt(0)->term.term = cider::ir::Term::CondBr;
+    ir.blockAt(0)->term.cond = ir.value(3, cider::ir::IRType::Bool,
+                                       ir.boolean());
+    ir.blockAt(0)->term.thenTarget = 1;
+    ir.blockAt(0)->term.elseTarget = 2;
+    ir.addBlock(1);
+    ir.blockAt(1)->term.term = cider::ir::Term::Ret;
+    ir.addBlock(2);
+    ir.blockAt(2)->term.term = cider::ir::Term::Ret;
+
+    cider::opt::SimplifyResult result = cider::opt::simplifyControlFlow(ir.module);
+    check(result.branchesFolded == 1, "the branch is folded");
+    check(blockLabels(*ir.fn) == "0,1,", "the false edge's block is removed");
+    check(ir.blockAt(0)->term.term == cider::ir::Term::Br &&
+              ir.blockAt(0)->term.target == 1,
+          "3 < 5 is true, so the then edge survives");
+    check(structurallyValid(ir.module), "the result is structurally valid");
+}
+
+void testCmpWithCastOperandsRefusesFold() {
+    std::printf("narrowing and signed-negative widening casts refuse a Cmp fold\n");
+    Ir ir;
+    cider::TypeRef b = ir.boolean();
+    cider::TypeRef i32 = ir.i32();
+    cider::TypeRef i8 = cider::TypeRef{ir.types.basic(cider::BasicKind::I8)};
+    cider::TypeRef u32 = cider::TypeRef{ir.types.basic(cider::BasicKind::U32)};
+
+    // A narrowing I32(-1) -> I8 Cast must not reuse the source immediate.
+    ir.emit(ir.constant(1, -1, cider::ir::IRType::I32, i32));
+    ir.emit(ir.cast(2, ir.value(1, cider::ir::IRType::I32, i32),
+                    cider::ir::IRType::I8, i8));
+    ir.emit(ir.constant(3, -1, cider::ir::IRType::I8, i8));
+    ir.emit(ir.cmp(4, cider::ir::CmpOp::Eq,
+                   ir.value(2, cider::ir::IRType::I8, i8),
+                   ir.value(3, cider::ir::IRType::I8, i8)));
+    ir.blockAt(0)->term.term = cider::ir::Term::CondBr;
+    ir.blockAt(0)->term.cond = ir.value(4, cider::ir::IRType::Bool, b);
+    ir.blockAt(0)->term.thenTarget = 1;
+    ir.blockAt(0)->term.elseTarget = 2;
+
+    // A signed-negative I8(-1) -> U32 widening Cast must not reuse -1 as U32.
+    ir.addBlock(1);
+    ir.emit(ir.constant(5, -1, cider::ir::IRType::I8, i8));
+    ir.emit(ir.cast(6, ir.value(5, cider::ir::IRType::I8, i8),
+                    cider::ir::IRType::U32, u32));
+    ir.emit(ir.constant(7, -1, cider::ir::IRType::U32, u32));
+    ir.emit(ir.cmp(8, cider::ir::CmpOp::Ult,
+                   ir.value(6, cider::ir::IRType::U32, u32),
+                   ir.value(7, cider::ir::IRType::U32, u32)));
+    ir.blockAt(1)->term.term = cider::ir::Term::CondBr;
+    ir.blockAt(1)->term.cond = ir.value(8, cider::ir::IRType::Bool, b);
+    ir.blockAt(1)->term.thenTarget = 3;
+    ir.blockAt(1)->term.elseTarget = 4;
+
+    ir.addBlock(2);
+    ir.blockAt(2)->term.term = cider::ir::Term::Ret;
+    ir.addBlock(3);
+    ir.blockAt(3)->term.term = cider::ir::Term::Ret;
+    ir.addBlock(4);
+    ir.blockAt(4)->term.term = cider::ir::Term::Ret;
+
+    cider::opt::SimplifyResult result = cider::opt::simplifyControlFlow(ir.module);
+    check(result.branchesFolded == 0, "neither Cast-derived branch is folded");
+    check(countOp(*ir.fn, cider::ir::Op::Cmp) == 2, "both Cmps remain");
+    check(countOp(*ir.fn, cider::ir::Op::Cast) == 2, "both Casts remain");
+    check(structurallyValid(ir.module), "the result is structurally valid");
+}
+
 void testPipelineResult() {
     std::printf("the pipeline reports the pass counters\n");
     Ir ir;
@@ -905,6 +1008,8 @@ int main() {
     testConstantThroughPhi();
     testDivergentPhiRefused();
     testDeterminism();
+    testCmpOfConstantsFoldsBranch();
+    testCmpWithCastOperandsRefusesFold();
     testPipelineResult();
     std::printf("\n%d checks, %s\n", checks,
                 failures == 0 ? "all passed" : "FAILURES");

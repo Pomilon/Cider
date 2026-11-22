@@ -267,10 +267,12 @@ PromotionResult mem2reg(ir::Module& module) {
         }
 
         // First sweep: classify every use and record direct accesses.
-        bool tainted = false;
+        // Taint is per-slot, not per-function: one alloca whose address
+        // escapes must not force every other local into memory (CIDER perf).
+        std::unordered_set<uint32_t> taintedSlots;
         auto escape = [&](uint32_t id) {
             if (allocas.find(id) != allocas.end()) {
-                tainted = true;
+                taintedSlots.insert(id);
             }
         };
         for (uint64_t bi = 0; bi < fn.blocks.size(); ++bi) {
@@ -304,8 +306,8 @@ PromotionResult mem2reg(ir::Module& module) {
                             if (instr.displacement != 0) {
                                 // A displacement can cross into the next
                                 // frame cell, and this slice has no range
-                                // proof; leave the function in memory.
-                                tainted = true;
+                                // proof; leave this slot in memory.
+                                taintedSlots.insert(instr.addressBase.id);
                             } else if (instr.isVolatile) {
                                 slot.volatileAccess = true;
                             } else {
@@ -321,7 +323,9 @@ PromotionResult mem2reg(ir::Module& module) {
                                 }
                             }
                         } else {
-                            tainted = true;
+                            // A non-Load/Store op naming an alloca as its
+                            // address base (e.g. GEP) escapes that slot.
+                            taintedSlots.insert(instr.addressBase.id);
                         }
                     }
                 }
@@ -345,9 +349,6 @@ PromotionResult mem2reg(ir::Module& module) {
                     escape(arm.value.id);
                 }
             }
-        }
-        if (tainted) {
-            continue;
         }
 
         std::unordered_map<uint32_t, uint64_t> paramIndex;
@@ -389,6 +390,9 @@ PromotionResult mem2reg(ir::Module& module) {
         std::unordered_map<uint32_t, std::vector<uint32_t>> phiBlocksBySlot;
         for (uint32_t id : order) {
             SlotInfo& slot = slots[id];
+            if (taintedSlots.count(id)) {
+                continue;  // address escapes: keep this slot in memory
+            }
             if (!scalarSlot(slot.type) || slot.volatileAccess ||
                 !slot.hasLoad || slot.accesses.empty()) {
                 continue;

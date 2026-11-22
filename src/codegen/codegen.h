@@ -43,16 +43,30 @@ struct EmitResult {
     Position pos{"", 1, 1};
 };
 
+// Which emitter answers. `Legacy` is the current emitter and the default
+// until the Stage 2 default flip; `Fast` is a separate selection whose
+// backend does not exist yet, so it routes to the current emitter for now.
+// The selection may not change what a program means, only which
+// implementation produces the text.
+enum class CodegenKind { Legacy, Fast };
+
 // Emits Intel-syntax assembly for one module on one target. The text is a pure
 // function of the module: no timestamps, no working directories, no absolute
 // paths — gate L5. `requireEntry` is false for a `--no-entry` module object:
 // such a module is a library fragment with no process entry of its own.
-EmitResult emitNative(const ir::Module& module, bool requireEntry = true);
+EmitResult emitNative(const ir::Module& module, CodegenKind kind,
+                      bool requireEntry = true);
 
 // The same, naming the target. Native is the implemented emitter; every other
 // kind returns its own diagnostic, because a backend that does not exist must
 // say which backend is missing rather than emit the wrong one.
-EmitResult emit(const ir::Module& module, Target kind, bool requireEntry = true);
+EmitResult emit(const ir::Module& module, Target kind, CodegenKind codegen,
+                bool requireEntry = true);
+
+// Existing call sites keep the legacy emitter without naming it.
+EmitResult emitNative(const ir::Module& module, bool requireEntry = true);
+EmitResult emit(const ir::Module& module, Target kind,
+                bool requireEntry = true);
 
 }  // namespace codegen
 }  // namespace cider

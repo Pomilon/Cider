@@ -128,11 +128,19 @@ def main():
             if escaped_before is None or escaped_after is None:
                 failures.append(
                     "the escape_of function is missing from the IR dump")
-            elif memory_counts(escaped_before) != memory_counts(escaped_after):
-                failures.append(
-                    "an escaping Alloca changed shape: %r -> %r" % (
-                        memory_counts(escaped_before),
-                        memory_counts(escaped_after)))
+            else:
+                # mem2reg taints per-slot: the escaped `a` must stay in memory
+                # (its address is taken and written through the `*p` alias),
+                # but the non-escaping pointer local `p` may now promote, so
+                # whole-function counts may legitimately drop by that load.
+                # Assert the escaped slot's memory traffic remains, not exact
+                # whole-function equality.
+                after_ld, after_st = memory_counts(escaped_after)
+                if after_ld < 1 or after_st < 1:
+                    failures.append(
+                        "the escaping Alloca left memory: %r -> %r" % (
+                            memory_counts(escaped_before),
+                            memory_counts(escaped_after)))
             for name in ("branchy", "loop_swap"):
                 body = function_body(opt.stdout, name)
                 if body is None:

@@ -390,6 +390,12 @@ public:
         // a value, not a slot. Slot-precise logic must not read slots then.
         bool hasIndirect = false;
         ir::Value indirect;
+        // When set, this is the value the null guard must test — the pristine
+        // base pointer, before any address arithmetic. `pointerElementPlace`
+        // sets it to the loaded base pointer so the guard tests `p`, not the
+        // computed `p + i`, which a nil base with i>0 would otherwise pass.
+        // Unset elsewhere: the guard falls back to `indirect` as before.
+        std::optional<ir::Value> nullGuard;
         // Set when slots[0] is a computed address rather than a slot: an
         // answer from the shared guarded address. A folded index advances
         // it with an Add; only a slot base takes a direct offset.

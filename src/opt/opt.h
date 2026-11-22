@@ -18,6 +18,8 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "ir/ir.h"
 
@@ -84,6 +86,22 @@ struct OptResult {
     uint64_t strengthReduced = 0;
     uint64_t strengthCopies = 0;
     uint64_t strengthConstants = 0;
+    // Sparse conditional constant propagation counters. `sccpConstants`
+    // counts results rewritten to Const, `sccpBranches` terminators folded to
+    // Br, `sccpBlocks` unreachable effect-free blocks removed, and `sccpPhis`
+    // single-incoming phis collapsed.
+    uint64_t sccpConstants = 0;
+    uint64_t sccpBranches = 0;
+    uint64_t sccpBlocks = 0;
+    uint64_t sccpPhis = 0;
+    // Escape/GEP-range analysis and aggregate SROA counters. `sroaSlots`
+    // counts Allocas removed, `sroaFields` the distinct displaced fields
+    // promoted to SSA values, and `sroaLoads`/`sroaStores` the accesses
+    // deleted with them.
+    uint64_t sroaSlots = 0;
+    uint64_t sroaFields = 0;
+    uint64_t sroaLoads = 0;
+    uint64_t sroaStores = 0;
     // Exact-byte rodata deduplication. `rodataMerged` counts duplicate blobs
     // removed; `rodataBytesMerged` counts their bytes, including terminators.
     uint64_t rodataMerged = 0;
@@ -220,7 +238,11 @@ struct PhiLowerResult {
 // reduction, the fourth after simplification, the fifth after block cleanup,
 // the sixth after value numbering and the seventh after LICM catch a malformed
 // rewrite before any later pass or codegen sees it.
-OptResult run(ir::Module& module);
+//
+// When `trace` is non-null, append one `== <pass> ==` section per transform:
+// the cumulative OptResult counters and ir::dumpModule(module) taken right
+// after that pass. The default nullptr path is byte-identical to the old run.
+OptResult run(ir::Module& module, std::string* trace = nullptr);
 
 // Clone small direct, same-module callees at their call sites, one level per
 // call site. Parameters become fresh Alloca slots plus explicit Stores of the
@@ -347,6 +369,56 @@ FunctionPruneResult pruneFunctions(ir::Module& module, const std::string& entry)
 // preserved and removal depends only on the module contents.
 WholeProgramPruneResult pruneWholeProgram(ir::Module& module,
                                           const std::string& entry);
+
+struct SccpResult {
+    uint64_t constantsReplaced = 0;
+    uint64_t branchesFolded = 0;
+    uint64_t blocksRemoved = 0;
+    uint64_t phisSimplified = 0;
+};
+
+// Sparse conditional constant propagation over the phi IR. Lattice values
+// are unknown / constant / overdefined; an edge is executable only when its
+// branch was proved taken. Phis meet over executable incoming edges and loop
+// phis are revisited until the lattice is stable. Only Const, Copy, int
+// arithmetic/bitwise/shift and integer Cmp with exact width/type are folded;
+// a Cast whose source value is not preserved is overdefined. No mayTrap,
+// volatile or Asm instruction is deleted, and no float value is folded.
+SccpResult sccp(ir::Module& module);
+
+// Per-slot escape and GEP facts for one function. `nonEscaping` holds the
+// Alloca result ids whose address is used only by direct Load/Store accesses;
+// `gepDisplacement` records the constant byte displacement of every GEP whose
+// base is such a slot; `asmPresent` is true when the function contains inline
+// assembly, which can name frame storage without an IR operand.
+struct SlotFacts {
+    std::unordered_set<uint32_t> nonEscaping;
+    std::unordered_map<uint32_t, int64_t> gepDisplacement;
+    bool asmPresent = false;
+};
+
+// Conservative, whole-function escape/GEP-range analysis. An Alloca escapes
+// when its address reaches a call, an argument, a phi, a stored value, an
+// indirect callee, a terminator, a volatile access, or a non-constant GEP
+// index. Because frame cells are adjacent, a GEP whose displacement can reach
+// a neighbour removes every Alloca in the function from `nonEscaping`.
+SlotFacts analyzeMemory(const ir::Function& fn);
+
+// What one aggregate-SROA run did. Kept separate from OptResult so the pass is
+// testable without the rest of the pipeline.
+struct SroaResult {
+    uint64_t slotsScalarized = 0;
+    uint64_t fieldsPromoted = 0;
+    uint64_t loadsRemoved = 0;
+    uint64_t storesRemoved = 0;
+};
+
+// Promote the distinct constant-displacement fields of a non-escaping
+// aggregate Alloca to SSA values. Runs after mem2reg; a slot with a GEP, an
+// escape, a volatile or global-labelled access, a width/type mismatch or a
+// load with no reaching store is left in memory. Strict-float semantics and
+// every trapping/volatile/asm instruction are preserved.
+SroaResult sroa(ir::Module& module);
 
 // Dead-code elimination. Deletes a definition only when every result is
 // unused, the instruction is pure, it cannot trap, and it is not volatile.

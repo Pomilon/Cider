@@ -312,67 +312,82 @@ def main():
             fail("gcc helper compile: " + describe(compiled))
         else:
             caller_src = source(tmp, "caller.cid", CALLER)
-            caller_asm = os.path.join(tmp, "caller.s")
-            caller_obj = os.path.join(tmp, "caller.o")
-            caller_bin = os.path.join(tmp, "caller.bin")
-            built = run([CIDER, "compile", caller_src, "-o", caller_asm],
-                        env=env)
-            if built.returncode != 0:
-                fail("Cider caller compile: " + describe(built))
-            else:
+            for mode, flags in (("legacy", []), ("fast", ["--codegen=fast"])):
+                caller_asm = os.path.join(tmp, "caller-%s.s" % mode)
+                caller_obj = os.path.join(tmp, "caller-%s.o" % mode)
+                caller_bin = os.path.join(tmp, "caller-%s.bin" % mode)
+                built = run([CIDER, "compile"] + flags +
+                            [caller_src, "-o", caller_asm], env=env)
+                if built.returncode != 0:
+                    fail("Cider %s caller compile: %s" %
+                         (mode, describe(built)))
+                    continue
                 text = open(caller_asm).read()
                 if "mov al," not in text:
-                    fail("Cider caller emitted no SysV al count")
+                    fail("Cider %s caller emitted no SysV al count" % mode)
                 assembled = run(["as", "-o", caller_obj, caller_asm])
                 if assembled.returncode != 0:
-                    fail("Cider caller assemble: " + describe(assembled))
+                    fail("Cider %s caller assemble: %s" %
+                         (mode, describe(assembled)))
+                    continue
+                linked = run([
+                    "ld", "-nostdlib", "-e", "_start", "-o", caller_bin,
+                    caller_obj, helper_obj,
+                ])
+                if linked.returncode != 0:
+                    fail("Cider-to-C %s link: %s" %
+                         (mode, describe(linked)))
                 else:
-                    linked = run([
-                        "ld", "-nostdlib", "-e", "_start", "-o", caller_bin,
-                        caller_obj, helper_obj,
-                    ])
-                    if linked.returncode != 0:
-                        fail("Cider-to-C link: " + describe(linked))
-                    else:
-                        run_program(caller_bin, CALLER_FAILURES)
+                    run_program(caller_bin, CALLER_FAILURES)
 
         # --- gcc calls Cider ---------------------------------------------
         sum_src = source(tmp, "sum.cid", SUM)
         c_caller = source(tmp, "c_caller.c", C_CALLER)
-        sum_obj = os.path.join(tmp, "sum.o")
         c_caller_obj = os.path.join(tmp, "c_caller.o")
-        sum_bin = os.path.join(tmp, "sum.bin")
         # A split entry object keeps the exported definitions, while a plain
         # whole-program executable would prune them as unreachable: only C
         # can see these callers.
-        built = run([
-            CIDER, "compile", "-c", "--module", "main", sum_src,
-            "-o", sum_obj,
-        ], env=env)
-        if built.returncode != 0:
-            fail("Cider variadic definition compile: " + describe(built))
         compiled = compile_c(c_caller, c_caller_obj)
         if compiled.returncode != 0:
             fail("gcc caller compile: " + describe(compiled))
-        if os.path.exists(sum_obj) and os.path.exists(c_caller_obj):
-            linked = run([
-                "ld", "-nostdlib", "-e", "_start", "-o", sum_bin,
-                sum_obj, c_caller_obj,
-            ])
-            if linked.returncode != 0:
-                fail("C-to-Cider link: " + describe(linked))
-            else:
-                run_program(sum_bin, SUM_FAILURES)
+        for mode, flags in (("legacy", []), ("fast", ["--codegen=fast"])):
+            sum_obj = os.path.join(tmp, "sum-%s.o" % mode)
+            sum_bin = os.path.join(tmp, "sum-%s.bin" % mode)
+            built = run([
+                CIDER, "compile", "-c", "--module", "main",
+            ] + flags + [sum_src, "-o", sum_obj], env=env)
+            if built.returncode != 0:
+                fail("Cider %s variadic definition compile: %s" %
+                     (mode, describe(built)))
+                continue
+            if os.path.exists(sum_obj) and os.path.exists(c_caller_obj):
+                linked = run([
+                    "ld", "-nostdlib", "-e", "_start", "-o", sum_bin,
+                    sum_obj, c_caller_obj,
+                ])
+                if linked.returncode != 0:
+                    fail("C-to-Cider %s link: %s" %
+                         (mode, describe(linked)))
+                else:
+                    run_program(sum_bin, SUM_FAILURES)
 
         # --- UEFI msabi variadic shape -----------------------------------
+        # Fast is native-only today, so this leg also pins the byte-for-byte
+        # legacy fallback: the same text must come out of both spellings.
         uefi_src = source(tmp, "uefi.cid", UEFI)
-        uefi_asm = os.path.join(tmp, "uefi.s")
-        compiled = run([
-            CIDER, "compile", "--target", "uefi", uefi_src, "-o", uefi_asm,
-        ], env=env)
-        if compiled.returncode != 0:
-            fail("uefi variadic compile: " + describe(compiled))
-        else:
+        uefi_legacy = os.path.join(tmp, "uefi-legacy.s")
+        uefi_fast = os.path.join(tmp, "uefi-fast.s")
+        for mode, asm_path, flags in (
+                ("legacy", uefi_legacy, []),
+                ("fast", uefi_fast, ["--codegen=fast"])):
+            uefi_asm = asm_path
+            compiled = run([
+                CIDER, "compile", "--target", "uefi",
+            ] + flags + [uefi_src, "-o", uefi_asm], env=env)
+            if compiled.returncode != 0:
+                fail("uefi %s variadic compile: %s" %
+                     (mode, describe(compiled)))
+                continue
             text = open(uefi_asm).read()
             for needle, what in (
                     ("mov qword ptr [rbp + 16], rcx",
@@ -387,18 +402,22 @@ def main():
                     ("call rax",
                      "the call through the variadic pointer")):
                 if needle not in text:
-                    fail("uefi variadic assembly lacks %s: %s" % (
-                        what, needle))
+                    fail("uefi %s variadic assembly lacks %s: %s" % (
+                        mode, what, needle))
             if "mov al," in text:
-                fail("uefi variadic call emitted an al count")
-            efi = os.path.join(tmp, "varargs.efi")
+                fail("uefi %s variadic call emitted an al count" % mode)
+            efi = os.path.join(tmp, "varargs-%s.efi" % mode)
             linked = run([LINK_UEFI, uefi_asm, "-o", efi])
             if linked.returncode != 0:
-                fail("uefi variadic link: " + describe(linked))
+                fail("uefi %s variadic link: %s" %
+                     (mode, describe(linked)))
             else:
                 problem = validate_pe32plus(efi)
                 if problem is not None:
-                    fail("uefi variadic image: " + problem)
+                    fail("uefi %s variadic image: %s" % (mode, problem))
+        if os.path.exists(uefi_legacy) and os.path.exists(uefi_fast):
+            if open(uefi_legacy).read() != open(uefi_fast).read():
+                fail("uefi fast did not fall back to legacy byte-for-byte")
 
     if failures:
         for failure in failures:

@@ -3630,6 +3630,94 @@ void testVariadicMsAbi() {
           "an msabi variadic callee reads the stack above the shadow space");
 }
 
+// A spilled integer constant is rematerialised at its use: the emitter writes
+// the immediate into the operand rather than reloading the value's frame slot.
+// The shape is hand-built IR so no optimiser can fold the pressure away.
+void testConstRematerialization() {
+    std::printf("constant rematerialization\n");
+    cider::ir::Module module;
+    module.name = "main";
+    cider::ir::Function fn;
+    fn.name = "probe";
+    cider::Signature signature({cider::Parameter{nullptr, false}}, nullptr,
+                               cider::Abi::SysV);
+    fn.signature = signature;
+    fn.params.push_back(cider::ir::Value{50, cider::ir::IRType::I64, {}});
+    fn.paramClasses.push_back(cider::ir::IRType::I64);
+    fn.exportSymbol = true;
+
+    cider::ir::Block block;
+    block.label = 0;
+    auto value = [](uint32_t id) {
+        cider::ir::Value out;
+        out.id = id;
+        out.width = cider::ir::IRType::I64;
+        return out;
+    };
+    auto binary = [&](cider::ir::Op op, uint32_t result,
+                      std::initializer_list<uint32_t> operands) {
+        cider::ir::Instr out;
+        out.op = op;
+        out.width = cider::ir::IRType::I64;
+        out.isPure = true;
+        out.results.push_back(value(result));
+        for (uint32_t operand : operands) {
+            out.operands.push_back(value(operand));
+        }
+        return out;
+    };
+
+    cider::ir::Instr constant;
+    constant.op = cider::ir::Op::Const;
+    constant.width = cider::ir::IRType::I64;
+    constant.isPure = true;
+    constant.constantBits = 1000;
+    constant.results.push_back(value(0));
+    block.body.push_back(std::move(constant));
+
+    // Sixteen live results, each live across every later definition and the
+    // join, force the register file past capacity. The constant is the only
+    // zero-cost interval, so pressure evicts it and it keeps its slot.
+    constexpr uint32_t kPressure = 16;
+    for (uint32_t i = 1; i <= kPressure; ++i) {
+        block.body.push_back(binary(cider::ir::Op::Add, i, {50, 50}));
+    }
+    cider::ir::Instr join;
+    join.op = cider::ir::Op::Add;
+    join.width = cider::ir::IRType::I64;
+    join.isPure = true;
+    for (uint32_t i = 1; i <= kPressure; ++i) {
+        join.operands.push_back(value(i));
+    }
+    join.results.push_back(value(kPressure + 1));
+    block.body.push_back(std::move(join));
+    block.body.push_back(
+        binary(cider::ir::Op::Add, kPressure + 2, {0, kPressure + 1}));
+
+    block.term.term = cider::ir::Term::Ret;
+    block.term.values.push_back(value(kPressure + 2));
+    fn.blocks.push_back(std::move(block));
+    module.functions.push_back(std::move(fn));
+
+    const cider::codegen::EmitResult emitted =
+        cider::codegen::emitNative(module, cider::codegen::CodegenKind::Legacy,
+                                   false);
+    check(emitted.ok, "rematerialization fixture emits: " + emitted.error);
+    if (!emitted.ok) {
+        return;
+    }
+    const std::string& text = emitted.text;
+    std::size_t immediate = 0;
+    for (std::size_t at = text.find("mov rax, 1000"); at != std::string::npos;
+         at = text.find("mov rax, 1000", at + 1)) {
+        ++immediate;
+    }
+    check(immediate >= 2,
+          "the constant's use is an immediate, not another slot reload");
+    check(text.find("mov rax, [rsp + 0]") == std::string::npos,
+          "the spilled constant is never reloaded from its frame slot");
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -3693,6 +3781,7 @@ int main() {
     testInterpRemoved();
     testFloat();
     testRegisterEscape();
+    testConstRematerialization();
     testAsm();
     testTrapMessages();
     testOperatorOverloadsNative();

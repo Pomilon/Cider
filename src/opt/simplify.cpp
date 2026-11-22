@@ -50,6 +50,7 @@ namespace {
 
 constexpr uint64_t kOneResult = 1;
 constexpr uint64_t kOneOperand = 1;
+constexpr uint64_t kTwoOperands = 2;
 constexpr uint64_t kOneIncoming = 1;
 
 // One resolved constant word. Width is carried so a caller can insist two
@@ -62,6 +63,37 @@ struct Constant {
 
 bool isFloatWidth(ir::IRType width) {
     return width == ir::IRType::F32 || width == ir::IRType::F64;
+}
+
+bool isFloatType(const TypeRef& type) {
+    return !type.isError() && type.type->kind() == Kind::Basic &&
+           basicIsFloat(*type.type->basic());
+}
+
+// Compare two proved integer constants. Signed predicates read the stored
+// word as int64_t; unsigned predicates compare the raw bits. A float operand
+// is refused by resolveOne before it ever reaches here.
+std::optional<bool> compareConstants(const ir::Instr& instr,
+                                     const Constant& lhs,
+                                     const Constant& rhs) {
+    if (lhs.width != rhs.width) {
+        return std::nullopt;
+    }
+    const int64_t a = static_cast<int64_t>(lhs.bits);
+    const int64_t b = static_cast<int64_t>(rhs.bits);
+    switch (instr.cmp) {
+        case ir::CmpOp::Eq:  return a == b;
+        case ir::CmpOp::Ne:  return a != b;
+        case ir::CmpOp::Lt:  return a < b;
+        case ir::CmpOp::Le:  return a <= b;
+        case ir::CmpOp::Gt:  return a > b;
+        case ir::CmpOp::Ge:  return a >= b;
+        case ir::CmpOp::Ult: return lhs.bits < rhs.bits;
+        case ir::CmpOp::Ule: return lhs.bits <= rhs.bits;
+        case ir::CmpOp::Ugt: return lhs.bits > rhs.bits;
+        case ir::CmpOp::Uge: return lhs.bits >= rhs.bits;
+    }
+    return std::nullopt;
 }
 
 // Resolve one definition using only definitions already proved constant.
@@ -122,6 +154,30 @@ std::optional<Constant> resolveOne(
                 return std::nullopt;
             }
         }
+        return value;
+    }
+    if (instr.op == ir::Op::Cmp && instr.operands.size() == kTwoOperands &&
+        isFloatWidth(instr.width) == false && !isFloatType(instr.type)) {
+        auto lhs = known.find(instr.operands[0].id);
+        auto rhs = known.find(instr.operands[1].id);
+        if (lhs == known.end() || rhs == known.end()) {
+            return std::nullopt;
+        }
+        if (instr.operands[0].width != instr.operands[1].width) {
+            return std::nullopt;
+        }
+        if (isFloatWidth(instr.operands[0].width) ||
+            isFloatWidth(instr.operands[1].width)) {
+            return std::nullopt;
+        }
+        std::optional<bool> holds =
+            compareConstants(instr, lhs->second, rhs->second);
+        if (!holds.has_value()) {
+            return std::nullopt;
+        }
+        Constant value;
+        value.bits = *holds ? 1 : 0;
+        value.width = result.width;
         return value;
     }
     return std::nullopt;

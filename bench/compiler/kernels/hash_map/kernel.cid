@@ -1,0 +1,304 @@
+# experimental(wrap)
+// Hash map: deterministic open-addressing string-key map with FNV-1a 64
+// hashing, fixed capacity, and linear probing in both languages. It models
+// Cid-MC src/inventory.cid keyed lookup; Cid-MC has no hash map to copy.
+// No randomness, no network.
+from std.io import print, printChar, exit, read_stdin;
+from std.alloc import malloc;
+
+const INPUT_CAP: int = 65536;
+const MAP_CAP: int = 64;
+const KEY_CAP: int = 32;
+const BENCH_REPEAT: int = 29800;
+
+struct Entry {
+    var used: bool;
+    var tomb: bool;
+    var key: [u8; 32];
+    var klen: int;
+    var val: i64;
+}
+
+func fnv1a(p: *u8, n: int) -> u64 {
+    var h: u64 = 14695981039346656037;
+    var i: int = 0;
+    while (i < n) {
+        h = (h ^ (p[i] as u64)) * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+func k_memcmp(a: *u8, b: *u8, n: int) -> int {
+    var i: int = 0;
+    while (i < n) {
+        if (a[i] != b[i]) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+func k_memcpy(dest: *u8, src: *u8, n: int) {
+    var i: int = 0;
+    while (i < n) {
+        dest[i] = src[i];
+        i = i + 1;
+    }
+}
+
+func map_index(h: u64) -> int {
+    return (h % (MAP_CAP as u64)) as int;
+}
+
+func map_insert(entries: *Entry, key: *u8, klen: int, val: i64) {
+    var idx: int = map_index(fnv1a(key, klen));
+    var first_tomb: int = -1;
+    var steps: int = 0;
+    while (steps < MAP_CAP) {
+        var e: *Entry = entries + idx;
+        if (e->used) {
+            if (e->klen == klen && k_memcmp(&e->key[0], key, klen) == 0) {
+                e->val = val;
+                return;
+            }
+        } else if (e->tomb) {
+            if (first_tomb < 0) {
+                first_tomb = idx;
+            }
+        } else {
+            break;
+        }
+        idx = (idx + 1) % MAP_CAP;
+        steps = steps + 1;
+    }
+    var target: int = idx;
+    if (first_tomb >= 0) {
+        target = first_tomb;
+    }
+    var e2: *Entry = entries + target;
+    e2->used = true;
+    e2->tomb = false;
+    e2->klen = klen;
+    k_memcpy(&e2->key[0], key, klen);
+    e2->val = val;
+}
+
+func map_get(entries: *Entry, key: *u8, klen: int, out_val: *i64) -> int {
+    var idx: int = map_index(fnv1a(key, klen));
+    var steps: int = 0;
+    while (steps < MAP_CAP) {
+        var e: *Entry = entries + idx;
+        if (!e->used && !e->tomb) {
+            return 0;
+        }
+        if (e->used && e->klen == klen &&
+            k_memcmp(&e->key[0], key, klen) == 0) {
+            *out_val = e->val;
+            return 1;
+        }
+        idx = (idx + 1) % MAP_CAP;
+        steps = steps + 1;
+    }
+    return 0;
+}
+
+func map_remove(entries: *Entry, key: *u8, klen: int) -> int {
+    var idx: int = map_index(fnv1a(key, klen));
+    var steps: int = 0;
+    while (steps < MAP_CAP) {
+        var e: *Entry = entries + idx;
+        if (!e->used && !e->tomb) {
+            return 0;
+        }
+        if (e->used && e->klen == klen &&
+            k_memcmp(&e->key[0], key, klen) == 0) {
+            e->used = false;
+            e->tomb = true;
+            return 1;
+        }
+        idx = (idx + 1) % MAP_CAP;
+        steps = steps + 1;
+    }
+    return 0;
+}
+
+func mix_byte(h: u64, b: u8) -> u64 {
+    return (h ^ (b as u64)) * 1099511628211;
+}
+
+func mix_bytes(h: u64, buf: *u8, pos: int, count: int) -> u64 {
+    var i: int = 0;
+    while (i < count) {
+        h = mix_byte(h, buf[pos + i]);
+        i = i + 1;
+    }
+    return h;
+}
+
+func mix_i64(h: u64, v: i64) -> u64 {
+    var u: u64 = v as u64;
+    var i: int = 7;
+    while (i >= 0) {
+        h = mix_byte(h, ((u >> ((i * 8) as u64)) & (0xFF as u64)) as u8);
+        i = i - 1;
+    }
+    return h;
+}
+
+func parse_i64(s: *u8, n: int) -> i64 {
+    var i: int = 0;
+    var neg: int = 0;
+    if (i < n && s[i] == 45 as u8) {
+        neg = 1;
+        i = i + 1;
+    }
+    var v: i64 = 0;
+    while (i < n) {
+        v = v * 10 + ((s[i] as i64) - 48 as i64);
+        i = i + 1;
+    }
+    if (neg == 1) {
+        v = 0 as i64 - v;
+    }
+    return v;
+}
+
+func read_input(out_len: *int) -> *u8 {
+    // One spare byte so the NUL terminator is always in bounds.
+    var buf: *u8 = malloc((INPUT_CAP + 1) as i64) as *u8;
+    var total: int = 0;
+    while (total < INPUT_CAP) {
+        var n: int = read_stdin(buf + total, INPUT_CAP - total);
+        if (n <= 0) {
+            break;
+        }
+        total = total + n;
+    }
+    if (total == INPUT_CAP) {
+        var extra: u8 = 0;
+        var n: int = read_stdin(&extra, 1);
+        if (n > 0) {
+            exit(2);
+        }
+    }
+    buf[total] = 0;
+    *out_len = total;
+    return buf;
+}
+
+func print_i64(v: i64) {
+    var digits: [u8; 20] = [0, ...];
+    var d: []u8 = digits[0:20];
+    var n: i64 = v;
+    var neg: bool = n < 0;
+    var i: int = 20;
+    if (n == 0) {
+        i = 19;
+        d[i] = 48;
+    } else {
+        while (n != 0) {
+            var rem: i64 = n % 10;
+            var digit: i64 = 48 + rem;
+            if (neg) {
+                digit = 48 - rem;
+            }
+            i = i - 1;
+            d[i] = digit as u8;
+            n = n / 10;
+        }
+        if (neg) {
+            i = i - 1;
+            d[i] = 45;
+        }
+    }
+    var k: int = i;
+    while (k < 20) {
+        printChar(d[k] as char);
+        k = k + 1;
+    }
+}
+
+func _start() -> void {
+    exit(main());
+}
+
+func main() -> int {
+    var n: int = 0;
+    var raw: *u8 = read_input(&n);
+
+    var entries: *Entry = malloc((MAP_CAP * (sizeof(Entry) as int)) as i64) as *Entry;
+    var h: u64 = 14695981039346656037;
+    var rep: int = 0;
+    while (rep < BENCH_REPEAT) {
+        var j: int = 0;
+        while (j < MAP_CAP) {
+            var e: *Entry = entries + j;
+            e->used = false;
+            e->tomb = false;
+            e->klen = 0;
+            e->val = 0;
+            j = j + 1;
+        }
+
+        var i: int = 0;
+        while (i < n) {
+            while (i < n && (raw[i] == 10 as u8 || raw[i] == 13 as u8)) {
+                i = i + 1;
+            }
+            if (i >= n) {
+                break;
+            }
+            var op: u8 = raw[i];
+            i = i + 1;
+            while (i < n && raw[i] == 32 as u8) {
+                i = i + 1;
+            }
+            var ks: int = i;
+            while (i < n && raw[i] != 32 as u8 && raw[i] != 10 as u8 && raw[i] != 13 as u8) {
+                i = i + 1;
+            }
+            var klen: int = i - ks;
+            var val: i64 = 0;
+            if (i < n && raw[i] == 32 as u8) {
+                i = i + 1;
+                var vs: int = i;
+                while (i < n && raw[i] != 10 as u8 && raw[i] != 13 as u8) {
+                    i = i + 1;
+                }
+                val = parse_i64(raw + vs, i - vs);
+            }
+
+            if (klen > KEY_CAP) {
+                // Malformed key: consume the line and ignore the operation.
+                continue;
+            }
+            var key: *u8 = raw + ks;
+            if (op == 80 as u8) { // 'P'
+                map_insert(entries, key, klen, val);
+            } else if (op == 71 as u8) { // 'G'
+                var got: i64 = 0;
+                var found: int = map_get(entries, key, klen, &got);
+                h = mix_byte(h, 1 as u8);
+                h = mix_bytes(h, key, 0, klen);
+                h = mix_i64(h, found as i64);
+                if (found == 1) {
+                    h = mix_i64(h, got);
+                } else {
+                    h = mix_i64(h, -1 as i64);
+                }
+            } else if (op == 82 as u8) { // 'R'
+                var removed: int = map_remove(entries, key, klen);
+                h = mix_byte(h, 2 as u8);
+                h = mix_bytes(h, key, 0, klen);
+                h = mix_i64(h, removed as i64);
+            }
+        }
+        rep = rep + 1;
+    }
+
+    print_i64(h as i64);
+    print("\n");
+    return 0;
+}
