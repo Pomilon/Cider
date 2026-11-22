@@ -29,7 +29,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CIDER = os.path.join(ROOT, "build", "v3", "cider")
+CIDER = os.environ.get("CIDER_BIN", os.path.join(ROOT, "build", "v3", "cider"))
 ENV = dict(os.environ, CIDER_LIB=os.path.join(ROOT, "modules"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from source_entry import with_main_entry  # noqa: E402
