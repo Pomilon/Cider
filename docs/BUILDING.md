@@ -54,7 +54,7 @@ interpret the unoptimized module.
 
 ## CTest
 
-The CTest suite contains 45 tests: unit tests for each compiler layer, the
+The CTest suite contains 74 tests: unit tests for each compiler layer, the
 architecture gates, and end-to-end tests for entries, targets, allocation,
 interfaces, objects, optimizer slices, and runtime diagnostics.
 
@@ -64,7 +64,7 @@ export CIDER_LIB="$PWD/modules"
 ctest --test-dir build --output-on-failure
 ```
 
-Expected result: `100% tests passed, 0 tests failed out of 45`.
+Expected result: `100% tests passed, 0 tests failed out of 74`.
 
 The UEFI boot smoke test is opt-in because it depends on firmware images:
 

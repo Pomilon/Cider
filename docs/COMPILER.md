@@ -93,16 +93,19 @@ rewrite becomes a compiler error rather than invalid assembly.
 The pipeline order is:
 
 1. inline small direct callees;
-2. promote scalar slots with `mem2reg`;
-3. fold integer constants;
-4. reduce integer identities and strength cases;
-5. simplify control flow from constant branches;
-6. remove empty blocks and merge single-predecessor blocks;
-7. value-number duplicate pure expressions;
-8. hoist loop-invariant expressions into existing preheaders;
-9. forward remaining scalar slots and remove dead stores;
-10. eliminate dead instructions;
-11. deduplicate exact-byte read-only data.
+2. promote scalar slots with `mem2reg`, inserting phis at control-flow joins;
+3. scalar-replace aggregates (`sroa`) and prune unused fields with escape analysis;
+4. fold integer constants to a bounded fixpoint and run sparse conditional
+   constant propagation (`sccp`);
+5. reduce integer identities and strength cases (including power-of-two
+   remainder and multiply);
+6. simplify control flow from constant branches;
+7. remove empty blocks and merge single-predecessor blocks;
+8. value-number duplicate pure expressions;
+9. hoist loop-invariant expressions into existing preheaders;
+10. forward remaining scalar slots and remove dead stores;
+11. eliminate dead instructions;
+12. deduplicate exact-byte read-only data.
 
 Whole-program executable builds then prune functions, globals, and rodata that
 the entry cannot reach. Split objects keep every definition because another
@@ -127,11 +130,17 @@ target descriptor, never the AST. It handles:
 - diagnosed traps that write `vm error: ...` and exit with status 2;
 - inline and module-level assembly.
 
-Register allocation is conservative and global: values that fit a block-local
-live range may stay in caller-saved registers, while longer-lived values use a
-callee-saved pool. Calls, traps, assembly, and other barriers prevent
-caller-saved values from remaining live across them. Values that cannot be
-homed keep their stack slot.
+The fast backend uses a whole-function linear-scan register allocator. Liveness
+gives each value a start, end, and use count; a value that crosses a barrier is
+assigned a callee-saved register, and the allocator evicts the lowest-cost
+non-crossing active value when the pools are full. A shared frame module lays
+out spill slots, callee saves, and the outgoing argument area; return epilogues
+are shared across functions with four or more returns. The emitter writes
+results directly into their assigned home and folds immediates into arithmetic,
+compares, copies, casts, and call arguments. Copy coalescing removes redundant
+moves, and dead callee-save pairs are dropped after folding. Values that cannot
+be homed keep their stack slot. Calls, traps, assembly, and other barriers
+prevent caller-saved values from remaining live across them.
 
 ## VM
 

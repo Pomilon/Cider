@@ -17,7 +17,7 @@ The repository is green on its four main verification surfaces:
 
 | Surface | Result |
 | --- | --- |
-| CTest | 45 of 45 tests pass |
+| CTest | 74 of 74 tests pass |
 | Differential corpus | 318 programs, 0 failures |
 | Architecture gates | 12 pass, 0 fail |
 | Differential fuzzer | 250 of 250 programs pass (seed 20261027) |

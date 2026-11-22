@@ -890,6 +890,21 @@ SccpResult sccp(ir::Module& module) {
                 break;
             }
         }
+        // Folding a Phi in place into a Const can leave a later Phi in the
+        // same block following that now-non-Phi instruction. Structural IR
+        // requires all phis to lead a block, so stably partition each block
+        // so every Phi precedes every non-Phi (relative order preserved).
+        for (ir::Block& block : fn.blocks) {
+            std::vector<ir::Instr> ordered;
+            ordered.reserve(block.body.size());
+            for (const ir::Instr& instr : block.body) {
+                if (instr.op == ir::Op::Phi) ordered.push_back(instr);
+            }
+            for (const ir::Instr& instr : block.body) {
+                if (instr.op != ir::Op::Phi) ordered.push_back(instr);
+            }
+            block.body = std::move(ordered);
+        }
     }
     return total;
 }

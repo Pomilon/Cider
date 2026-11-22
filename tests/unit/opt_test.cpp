@@ -660,6 +660,24 @@ void testMem2RegLoop() {
 }
 
 // Repeated definitions in one path need no phi.
+// Regression: SCCP must not fold a Phi in place, which can leave a later Phi
+// in the same block following a non-Phi and break the structural rule.
+void testSccpPhiOrdering() {
+    std::printf("sccp keeps phis at the start of a block\n");
+    Piped r = pipe(
+        "func main() -> int {\n"
+        "    var v1: u32 = (0) as u32;\n"
+        "    var v2: u32 = (1) as u32;\n"
+        "    var v3: u32 = 0;\n"
+        "    v3 = v3 + (8);\n"
+        "    for (var v4: u32 = 0; v4 < 2; v4 = v4 + 1) { v3 = v3 + (v1); }\n"
+        "    for (var v5: u32 = 0; v5 < 2; v5 = v5 + 1) { v3 = v3 + (0); }\n"
+        "    v3 = v3 + (v2);\n"
+        "    return v3 as int;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises without a phi-ordering failure: " + r.stage);
+}
+
 void testMem2RegMultipleDefs() {
     std::printf("mem2reg handles repeated definitions\n");
     Piped r = pipe(
@@ -1961,6 +1979,7 @@ int main() {
     testMem2RegJoin();
     testMem2RegNestedJoins();
     testMem2RegLoop();
+    testSccpPhiOrdering();
     testMem2RegMultipleDefs();
     testMem2RegParameter();
     testMem2RegCall();
